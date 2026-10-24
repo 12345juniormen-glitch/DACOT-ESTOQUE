@@ -1,0 +1,11 @@
+node_modules
+dist
+dist-ssr
+*.local
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+*.tsbuildinfo
+/freebuff-sites-build/
