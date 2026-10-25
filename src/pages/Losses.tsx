@@ -92,7 +92,7 @@ export function LossesPage() {
       <PageHeader
         eyebrow="07 / Perdas"
         title="Perdas"
-        description="Onde o dinheiro está sendo perdido. Cada registro gera saída de estoque com motivo, valor e responsável."
+        description="Acompanhe o impacto das perdas e registre a causa para reduzir recorrências."
         actions={
           can('losses.manage') ? (
             <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
@@ -103,8 +103,8 @@ export function LossesPage() {
         }
       />
 
-      <section className="panel mb-5 grid grid-cols-2 gap-px overflow-hidden bg-line md:grid-cols-4">
-        <div className="bg-panel px-4 py-4">
+      <section className="panel mb-5 grid grid-cols-2 gap-px overflow-hidden bg-line md:grid-cols-3">
+        <div className="bg-panel px-4 py-4 md:col-span-1">
           <div className="eyebrow">Perdas no mês</div>
           <div className="mt-2 num text-[21px] text-copper">{money(totals.month)}</div>
           <div className="mt-1.5 text-[10.5px] text-dim">
@@ -123,12 +123,13 @@ export function LossesPage() {
             {totals.reason ? money(totals.reason.valueCents) : 'sem registros'}
           </div>
         </div>
-        <div className="bg-panel px-4 py-4">
-          <div className="eyebrow">Item com maior perda</div>
-          <div className="mt-2 truncate text-[15px] text-cream">{totals.item?.item.name ?? '—'}</div>
-          <div className="mt-1.5 num text-[10.5px] text-dim">
-            {totals.item ? money(totals.item.valueCents) : 'sem registros'}
-          </div>
+        <div className="col-span-2 bg-panel px-4 py-2.5 md:col-span-3">
+          <details>
+            <summary className="cursor-pointer text-[10.5px] text-dim hover:text-muted">Mais resumo</summary>
+            <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-muted">
+              <span>Item com maior perda: {totals.item?.item.name ?? '—'} · {totals.item ? money(totals.item.valueCents) : 'sem registros'}</span>
+            </div>
+          </details>
         </div>
       </section>
 
@@ -194,16 +195,14 @@ export function LossesPage() {
           ) : (
             <>
               <div className="scroll-x hidden md:block">
-                <table className="table min-w-[780px]">
+                <table className="table min-w-[540px]">
                   <thead>
                     <tr>
-                      <th>Data</th>
                       <th>Insumo</th>
                       <th className="text-right">Quantidade</th>
                       <th>Motivo</th>
                       <th className="text-right">Valor perdido</th>
-                      <th>Responsável</th>
-                      <th>Observação</th>
+                      <th>Registro</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -212,10 +211,7 @@ export function LossesPage() {
                       const user = state.users.find((u) => u.id === loss.userId);
                       return (
                         <tr key={loss.id} id={`loss-record-${loss.id}`} className={focusedLoss?.id === loss.id ? 'bg-copper/10' : undefined}>
-                          <td className="whitespace-nowrap font-mono text-[10.5px] text-dim">
-                            {date(loss.at)} · {time(loss.at)}
-                          </td>
-                          <td className="text-[12.5px] text-cream">{item?.name ?? '—'}</td>
+                          <td className="text-[12.5px] text-cream">{item?.name ?? '—'}<div className="mt-0.5 font-mono text-[10px] text-dim">{date(loss.at)}</div></td>
                           <td className="text-right num text-[12px] text-cream">
                             {item ? fmtQty(loss.qty, item.unit) : loss.qty}
                           </td>
@@ -223,9 +219,11 @@ export function LossesPage() {
                           <td className="text-right num text-[12.5px] text-copper">
                             {money(loss.valueCents)}
                           </td>
-                          <td className="text-[11px] text-muted">{user?.name ?? '—'}</td>
-                          <td className="max-w-[220px] truncate text-[10.5px] text-dim">
-                            {loss.note || '—'}
+                          <td className="text-[11px] text-muted">
+                            <details>
+                              <summary className="cursor-pointer text-muted hover:text-cream">Detalhes</summary>
+                              <div className="mt-1 min-w-[160px] text-[10px] leading-relaxed text-dim">{time(loss.at)} · {user?.name ?? '—'}{loss.note ? <div>{loss.note}</div> : null}</div>
+                            </details>
                           </td>
                         </tr>
                       );
@@ -247,9 +245,7 @@ export function LossesPage() {
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="text-[13px] text-cream">{item?.name ?? '—'}</div>
-                          <div className="mt-0.5 text-[10.5px] text-dim">
-                            {date(loss.at)} · {loss.reason} · {user?.name.split(' ')[0]}
-                          </div>
+                          <div className="mt-0.5 text-[10.5px] text-dim">{date(loss.at)} · {loss.reason}</div>
                         </div>
                         <div className="text-right">
                           <div className="num text-[13px] text-copper">{money(loss.valueCents)}</div>
@@ -258,9 +254,10 @@ export function LossesPage() {
                           </div>
                         </div>
                       </div>
-                      {loss.note ? (
-                        <p className="mt-1.5 text-[10.5px] leading-relaxed text-dim">{loss.note}</p>
-                      ) : null}
+                      <details className="mt-1.5 text-[10.5px] text-dim">
+                        <summary className="cursor-pointer">Responsável e observação</summary>
+                        <div className="mt-1">{time(loss.at)} · {user?.name ?? '—'}{loss.note ? <p className="mt-1 leading-relaxed">{loss.note}</p> : null}</div>
+                      </details>
                     </div>
                   );
                 })}

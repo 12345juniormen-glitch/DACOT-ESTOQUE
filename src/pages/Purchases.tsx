@@ -132,7 +132,7 @@ export function PurchasesPage() {
       <PageHeader
         eyebrow="04 / Compras"
         title="Compras"
-        description="Pedidos de compra, recebimento e atualização de custo. Receber um pedido registra entrada, preço e fornecedor no histórico."
+        description="Acompanhe entregas pendentes e confirme o que chegou."
         actions={
           can('purchases.manage') ? (
             <button type="button" className="btn btn-primary" onClick={() => setDrawerOpen(true)}>
@@ -178,15 +178,13 @@ export function PurchasesPage() {
         ) : (
           <>
             <div className="scroll-x hidden md:block">
-              <table className="table min-w-[840px]">
+              <table className="table min-w-[620px]">
                 <thead>
                   <tr>
                     <th>Pedido</th>
                     <th>Fornecedor</th>
                     <th>Situação</th>
-                    <th className="text-right">Itens</th>
                     <th className="text-right">Total</th>
-                    <th>Criado</th>
                     <th>Previsão</th>
                     <th />
                   </tr>
@@ -208,14 +206,8 @@ export function PurchasesPage() {
                         <td>
                           <PurchaseStatusTag status={purchase.status} />
                         </td>
-                        <td className="text-right num text-[11.5px] text-muted">
-                          {purchase.lines.length}
-                        </td>
                         <td className="text-right num text-[12.5px] text-cream">
                           {money(purchaseTotalCents(purchase))}
-                        </td>
-                        <td className="whitespace-nowrap font-mono text-[10.5px] text-dim">
-                          {shortDate(purchase.createdAt)}
                         </td>
                         <td className="whitespace-nowrap font-mono text-[10.5px] text-muted">
                           {purchase.expectedDeliveryAt ? date(purchase.expectedDeliveryAt) : '—'}
@@ -250,16 +242,12 @@ export function PurchasesPage() {
                         <div className="num text-[13px] text-cream">
                           {money(purchaseTotalCents(purchase))}
                         </div>
-                        <div className="mt-0.5 text-[10px] text-dim">
-                          {purchase.lines.length} itens
-                        </div>
                       </div>
                     </div>
-                    <div className="mt-2 flex items-center justify-between">
+                    <div className="mt-2 flex items-center justify-between gap-2">
                       <PurchaseStatusTag status={purchase.status} />
                       <span className="font-mono text-[10px] text-dim">
-                        {shortDate(purchase.createdAt)} · previsão{' '}
-                        {purchase.expectedDeliveryAt ? shortDate(purchase.expectedDeliveryAt) : '—'}
+                        {purchase.expectedDeliveryAt ? `Prev. ${shortDate(purchase.expectedDeliveryAt)}` : `${purchase.lines.length} itens`}
                       </span>
                     </div>
                   </Link>

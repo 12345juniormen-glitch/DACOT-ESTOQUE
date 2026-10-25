@@ -31,6 +31,7 @@ export function CountsPage() {
     (a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime(),
   );
   const openCounts = counts.filter((count) => count.status === 'open');
+  const pendingCounts = counts.filter((count) => count.status !== 'approved');
   const low = belowMinItems(state);
 
   const candidates = useMemo(() => {
@@ -111,39 +112,17 @@ export function CountsPage() {
         </Panel>
       ) : null}
 
-      <div className="grid grid-cols-2 gap-px border border-line bg-line md:grid-cols-4">
-        <div className="bg-panel px-4 py-3.5">
-          <div className="eyebrow">Contagens aprovadas</div>
-          <div className="mt-1.5 num text-[18px] text-cream">
-            {counts.filter((c) => c.status === 'approved').length}
-          </div>
-        </div>
-        <div className="bg-panel px-4 py-3.5">
-          <div className="eyebrow">Itens abaixo do mínimo</div>
-          <div className="mt-1.5 num text-[18px] text-copper">{low.length}</div>
-        </div>
-        <div className="bg-panel px-4 py-3.5">
-          <div className="eyebrow">Divergência aprovada</div>
-          <div className="mt-1.5 num text-[18px] text-cream">
-            {money(
-              counts
-                .filter((c) => c.status === 'approved')
-                .reduce((sum, c) => sum + Math.abs(countFinancialCents(state, c)), 0),
-            )}
-          </div>
-        </div>
-        <div className="bg-panel px-4 py-3.5">
-          <div className="eyebrow">Última contagem</div>
-          <div className="mt-1.5 num text-[18px] text-cream">
-            {counts[0]?.code ?? '—'}
-          </div>
-        </div>
-      </div>
+      <section className="mb-5 flex flex-wrap items-center gap-x-6 gap-y-2 border-y border-line px-1 py-3 text-[11px] text-muted">
+        <span><span className="num text-cream">{pendingCounts.length}</span> pendentes</span>
+        <span><span className="num text-cream">{counts.filter((c) => c.status === 'approved').length}</span> aprovadas</span>
+        <span><span className="num text-cream">{money(counts.filter((c) => c.status === 'approved').reduce((sum, c) => sum + Math.abs(countFinancialCents(state, c)), 0))}</span> divergência acumulada</span>
+        <span className="text-dim">{counts[0] ? `Última: ${counts[0].code}` : 'Sem contagens'}</span>
+        <span className="text-dim">{low.length} insumos abaixo do mínimo</span>
+      </section>
 
       <Panel
-        className="mt-5"
         title="Histórico de contagens"
-        subtitle="Aprovações geram ajustes no estoque, nunca apagam o saldo anterior."
+        subtitle="Abra uma contagem para conferir itens, responsáveis e ajustes registrados."
         flush
         bodyClassName=""
       >
@@ -162,24 +141,20 @@ export function CountsPage() {
           />
         ) : (
           <div className="scroll-x">
-            <table className="table min-w-[760px]">
+            <table className="table min-w-[520px]">
               <thead>
                 <tr>
                   <th>Contagem</th>
-                  <th>Situação</th>
-                  <th className="text-right">Itens conferidos</th>
+                  <th>Estado</th>
+                  <th className="text-right">Conferidos</th>
                   <th className="text-right">Divergências</th>
-                  <th className="text-right">Impacto financeiro</th>
-                  <th>Iniciada</th>
-                  <th>Responsável</th>
-                  <th>Aprovação</th>
+                  <th className="text-right">Impacto</th>
                 </tr>
               </thead>
               <tbody>
                 {counts.map((count) => {
                   const checked = count.lines.filter((l) => l.countedQty != null).length;
                   const financial = countFinancialCents(state, count);
-                  const creator = state.users.find((u) => u.id === count.createdBy);
                   const status = COUNT_STATUS[count.status];
                   return (
                     <tr key={count.id} className="row-link">
@@ -203,13 +178,6 @@ export function CountsPage() {
                         }`}
                       >
                         {count.status === 'approved' ? money(financial) : '—'}
-                      </td>
-                      <td className="whitespace-nowrap text-[11px] text-dim">
-                        {dateTime(count.startedAt)}
-                      </td>
-                      <td className="text-[11px] text-muted">{creator?.name ?? '—'}</td>
-                      <td className="whitespace-nowrap text-[11px] text-dim">
-                        {count.approvedAt ? dateTime(count.approvedAt) : 'pendente'}
                       </td>
                     </tr>
                   );

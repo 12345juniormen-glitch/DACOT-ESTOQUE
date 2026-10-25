@@ -50,7 +50,7 @@ export function SuppliersPage() {
       <PageHeader
         eyebrow="05 / Fornecedores"
         title="Fornecedores"
-        description="Quem fornece cada insumo, por quanto, com qual prazo e mínimo de pedido. O preço registrado vem das compras recebidas."
+        description="Preços, prazos e compras ficam no cadastro de cada fornecedor."
         actions={
           can('suppliers.manage') ? (
             <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
@@ -63,7 +63,7 @@ export function SuppliersPage() {
 
       <Panel
         title="Cadastro de fornecedores"
-        subtitle={`${state.suppliers.length} fornecedores ativos`}
+        subtitle={`${state.suppliers.length} fornecedores · abra um cadastro para contatos, prazos e histórico`}
         flush
         bodyClassName=""
       >
@@ -83,50 +83,27 @@ export function SuppliersPage() {
         ) : (
           <>
             <div className="scroll-x hidden md:block">
-              <table className="table min-w-[860px]">
+              <table className="table min-w-[520px]">
                 <thead>
                   <tr>
                     <th>Fornecedor</th>
-                    <th>Contato</th>
-                    <th>Telefone</th>
-                    <th className="text-right">Prazo médio</th>
-                    <th className="text-right">Pedido mínimo</th>
-                    <th className="text-right">Itens</th>
-                    <th>Última compra</th>
                     <th className="text-right">Comprado (90d)</th>
+                    <th className="text-right">Itens</th>
                     <th />
                   </tr>
                 </thead>
                 <tbody>
                   {state.suppliers.map((supplier) => {
-                    const last = supplierLastPurchase(state, supplier.id);
                     return (
                       <tr key={supplier.id} className="row-link">
                         <td>
                           <Link to={`/fornecedores/${supplier.id}`} className="block">
                             <div className="text-[13px] text-cream">{supplier.name}</div>
-                            <div className="mt-0.5 text-[10.5px] text-dim">
-                              {supplier.notes.slice(0, 42)}
-                              {supplier.notes.length > 42 ? '…' : ''}
-                            </div>
                           </Link>
                         </td>
-                        <td className="text-[11.5px] text-muted">{supplier.contact}</td>
-                        <td className="num text-[11px] text-muted">{supplier.phone}</td>
-                        <td className="text-right text-[11.5px] text-muted">
-                          {supplier.avgLeadTimeDays} dias
-                        </td>
-                        <td className="text-right num text-[11.5px] text-muted">
-                          {money(supplier.minOrderCents)}
-                        </td>
+                        <td className="text-right num text-[12px] text-cream">{money(supplierRecentValue(state, supplier.id))}</td>
                         <td className="text-right num text-[11.5px] text-muted">
                           {supplierItemCount(state, supplier.id)}
-                        </td>
-                        <td className="whitespace-nowrap font-mono text-[10.5px] text-dim">
-                          {last?.receivedAt ? shortDate(last.receivedAt) : '—'}
-                        </td>
-                        <td className="text-right num text-[12px] text-cream">
-                          {money(supplierRecentValue(state, supplier.id))}
                         </td>
                         <td className="w-8">
                           <ArrowRight size={13} className="text-dim" />
@@ -150,21 +127,11 @@ export function SuppliersPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="truncate text-[13.5px] text-cream">{supplier.name}</div>
-                        <div className="mt-0.5 text-[10.5px] text-muted">
-                          {supplier.contact} · {supplier.phone}
-                        </div>
+                        <div className="mt-0.5 text-[10.5px] text-dim">{supplierItemCount(state, supplier.id)} itens · prazo médio {supplier.avgLeadTimeDays} dias</div>
                       </div>
                       <ArrowRight size={13} className="mt-0.5 shrink-0 text-dim" />
                     </div>
-                    <div className="mt-2 flex items-center justify-between text-[10.5px] text-dim">
-                      <span>
-                        prazo {supplier.avgLeadTimeDays}d · mínimo {money(supplier.minOrderCents)}
-                      </span>
-                      <span>
-                        {supplierItemCount(state, supplier.id)} itens ·{' '}
-                        {last?.receivedAt ? shortDate(last.receivedAt) : 'sem compra'}
-                      </span>
-                    </div>
+                    <div className="mt-2 flex items-center justify-between text-[10.5px] text-dim"><span>{last?.receivedAt ? `Última compra ${shortDate(last.receivedAt)}` : 'Sem compra recebida'}</span><span className="num text-muted">{money(supplierRecentValue(state, supplier.id))} em 90 dias</span></div>
                   </Link>
                 );
               })}
@@ -174,8 +141,7 @@ export function SuppliersPage() {
       </Panel>
 
       <p className="mt-3 text-[10.5px] leading-relaxed text-dim">
-        Um insumo pode ter vários fornecedores. O menor preço registrado aparece na comparação do
-        insumo — prazo e pedido mínimo continuam visíveis para a decisão.
+        Contatos, pedido mínimo, itens e histórico de preços continuam disponíveis ao abrir cada fornecedor.
       </p>
 
       <Drawer

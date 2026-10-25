@@ -4,7 +4,7 @@ import { Boxes, ChevronRight, ClipboardList, Plus, Search } from 'lucide-react';
 import { useApp } from '../state/AppStore';
 import { CATEGORIES, STATUS_LABEL, UNIT_LABEL, type ItemStatus, type Unit } from '../domain/types';
 import { itemStatus, itemValueCents, stockValueCents } from '../domain/selectors';
-import { money, parseMoney, parseQty, qty as fmtQty, shortDate } from '../domain/format';
+import { money, parseMoney, parseQty, qty as fmtQty } from '../domain/format';
 import { Drawer, EmptyState, Field, PageHeader, Panel, StatusTag } from '../components/ui';
 
 const STATUS_ORDER: ItemStatus[] = ['normal', 'attention', 'critical', 'empty'];
@@ -15,7 +15,7 @@ export function InventoryPage() {
   const { state, actions, can } = useApp();
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
-  const [status, setStatus] = useState<'all' | ItemStatus>('all');
+  const [status, setStatus] = useState<'all' | ItemStatus | 'needs-attention'>('all');
   const [sort, setSort] = useState<SortKey>('name');
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -37,7 +37,8 @@ export function InventoryPage() {
     const term = search.trim().toLowerCase();
     const list = state.items.filter((item) => {
       if (category !== 'all' && item.category !== category) return false;
-      if (status !== 'all' && itemStatus(item) !== status) return false;
+      if (status === 'needs-attention' && itemStatus(item) === 'normal') return false;
+      if (status !== 'all' && status !== 'needs-attention' && itemStatus(item) !== status) return false;
       if (!term) return true;
       const supplier = state.suppliers.find((s) => s.id === item.primarySupplierId);
       return (
@@ -177,16 +178,19 @@ export function InventoryPage() {
           >
             Todos <span className="font-mono text-[10px] text-dim">{counts.all}</span>
           </button>
-          {STATUS_ORDER.map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setStatus(key)}
-              className={`filter-tab ${status === key ? 'filter-tab-active' : ''}`}
-            >
-              {STATUS_LABEL[key]} <span className="font-mono text-[10px] text-dim">{counts[key]}</span>
-            </button>
-          ))}
+          <button type="button" onClick={() => setStatus('needs-attention')} className={`filter-tab ${status === 'needs-attention' ? 'filter-tab-active' : ''}`}>
+            Atenção <span className="font-mono text-[10px] text-dim">{counts.all - counts.normal}</span>
+          </button>
+          <details className="relative">
+            <summary className="filter-tab cursor-pointer">Filtrar estado</summary>
+            <div className="absolute left-0 top-full z-10 mt-1 min-w-[180px] border border-line bg-panel p-1">
+              {STATUS_ORDER.map((key) => (
+                <button key={key} type="button" onClick={() => setStatus(key)} className={`flex w-full items-center justify-between px-2.5 py-2 text-left text-[11px] ${status === key ? 'bg-raised text-cream' : 'text-muted hover:bg-raised'}`}>
+                  {STATUS_LABEL[key]} <span className="font-mono text-[10px] text-dim">{counts[key]}</span>
+                </button>
+              ))}
+            </div>
+          </details>
         </div>
 
         {filtered.length === 0 ? (
@@ -222,53 +226,33 @@ export function InventoryPage() {
         ) : (
           <>
             <div className="scroll-x hidden md:block">
-              <table className="table min-w-[920px]">
+              <table className="table min-w-[520px]">
                 <thead>
                   <tr>
                     <th>Insumo</th>
-                    <th>Situação</th>
-                    <th className="text-right">Estoque atual</th>
-                    <th className="text-right">Mínimo</th>
-                    <th className="text-right">Custo unit.</th>
-                    <th className="text-right">Valor</th>
-                    <th>Fornecedor</th>
-                    <th className="text-right">Atualizado</th>
+                    <th className="text-right">Saldo atual</th>
                     <th />
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.map((item) => {
-                    const supplier = state.suppliers.find((s) => s.id === item.primarySupplierId);
                     return (
                       <tr key={item.id} className="row-link">
                         <td>
                           <Link to={`/estoque/${item.id}`} className="block">
                             <div className="text-[13px] text-cream">{item.name}</div>
-                            <div className="mt-0.5 text-[10.5px] uppercase tracking-[0.06em] text-dim">
+                            <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10.5px] text-dim">
                               {item.category}
+                              {itemStatus(item) === 'attention' ? <span className="text-warn">· Abaixo do mínimo ({fmtQty(item.minQty, item.unit)})</span> : null}
+                              {itemStatus(item) === 'critical' ? <span className="text-danger">· Crítico · mín. {fmtQty(item.minQty, item.unit)}</span> : null}
+                              {itemStatus(item) === 'empty' ? <span className="text-danger">· Sem estoque · mín. {fmtQty(item.minQty, item.unit)}</span> : null}
                             </div>
                           </Link>
-                        </td>
-                        <td>
-                          <StatusTag status={itemStatus(item)} />
                         </td>
                         <td className="text-right">
                           <span className="num text-[13px] text-cream">
                             {fmtQty(item.currentQty, item.unit)}
                           </span>
-                        </td>
-                        <td className="text-right num text-[11.5px] text-dim">
-                          {fmtQty(item.minQty, item.unit)}
-                        </td>
-                        <td className="text-right num text-[11.5px] text-muted">
-                          {money(item.costCents)}/{item.unit}
-                        </td>
-                        <td className="text-right num text-[12.5px] text-cream">
-                          {money(itemValueCents(item))}
-                        </td>
-                        <td className="text-[11.5px] text-muted">{supplier?.name ?? '—'}</td>
-                        <td className="text-right whitespace-nowrap font-mono text-[10.5px] text-dim">
-                          {shortDate(item.updatedAt)}
                         </td>
                         <td className="w-8 text-right">
                           <ChevronRight size={13} className="inline text-dim" />
@@ -291,24 +275,16 @@ export function InventoryPage() {
                     <div className="min-w-0">
                       <div className="truncate text-[13.5px] text-cream">{item.name}</div>
                       <div className="mt-0.5 text-[10px] uppercase tracking-[0.08em] text-dim">
-                        {item.category} · mínimo {fmtQty(item.minQty, item.unit)}
+                        {item.category}{itemStatus(item) !== 'normal' ? ` · mín. ${fmtQty(item.minQty, item.unit)}` : ''}
                       </div>
                     </div>
                     <div className="shrink-0 text-right">
                       <div className="num text-[15px] text-cream">
                         {fmtQty(item.currentQty, item.unit)}
                       </div>
-                      <div className="num mt-0.5 text-[10.5px] text-dim">
-                        {money(itemValueCents(item))}
-                      </div>
                     </div>
                   </div>
-                  <div className="mt-2 flex items-center justify-between">
-                    <StatusTag status={itemStatus(item)} />
-                    <span className="num text-[10.5px] text-dim">
-                      {money(item.costCents)}/{item.unit}
-                    </span>
-                  </div>
+                  <div className="mt-1 min-h-4">{itemStatus(item) !== 'normal' ? <StatusTag status={itemStatus(item)} /> : null}</div>
                 </Link>
               ))}
             </div>

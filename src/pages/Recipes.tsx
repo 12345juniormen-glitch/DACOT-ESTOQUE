@@ -2,7 +2,7 @@ import { Link } from 'react-router-dom';
 import { ArrowRight, BookOpen } from 'lucide-react';
 import { useApp } from '../state/AppStore';
 import { recipeCostCents, recipeMargin } from '../domain/selectors';
-import { money, shortDate } from '../domain/format';
+import { money } from '../domain/format';
 import { EmptyState, PageHeader, Panel } from '../components/ui';
 
 export function RecipesPage() {
@@ -24,7 +24,7 @@ export function RecipesPage() {
       <PageHeader
         eyebrow="06 / Fichas Técnicas"
         title="Fichas técnicas"
-        description="A ponte entre o prato vendido e o insumo consumido. O custo usa o preço atual; snapshots guardam o custo histórico dos pedidos já realizados."
+        description="Configure a ficha uma vez. Pedidos entregues usam esses ingredientes para calcular o consumo e o custo do prato."
         meta={
           <>
             <span className="text-[11px] text-muted">
@@ -37,13 +37,13 @@ export function RecipesPage() {
             </span>
             <span className="text-[11px] text-dim">·</span>
             <span className="text-[11px] text-muted">
-              <span className="num text-copper">{attention}</span> acima de 35%
+              <span className="num text-copper">{attention}</span> acima de 35% de custo
             </span>
           </>
         }
       />
 
-      <Panel title="Pratos e produtos" subtitle="Ordenados pela margem estimada." flush bodyClassName="">
+      <Panel title="Pratos e produtos" subtitle="Custo atual por prato; itens acima de 35% pedem revisão." flush bodyClassName="">
         {rows.length === 0 ? (
           <EmptyState
             icon={<BookOpen size={18} />}
@@ -58,16 +58,12 @@ export function RecipesPage() {
         ) : (
           <>
             <div className="scroll-x hidden md:block">
-              <table className="table min-w-[820px]">
+              <table className="table min-w-[520px]">
                 <thead>
                   <tr>
                     <th>Prato / produto</th>
-                    <th className="text-right">Preço de venda</th>
-                    <th className="text-right">Custo</th>
-                    <th className="text-right">Margem bruta</th>
-                    <th className="w-[150px]">% de custo</th>
-                    <th className="text-right">Ingredientes</th>
-                    <th className="text-right">Atualizada</th>
+                    <th className="text-right">Custo atual</th>
+                    <th className="text-right">Do preço de venda</th>
                     <th />
                   </tr>
                 </thead>
@@ -78,39 +74,15 @@ export function RecipesPage() {
                         <Link to={`/fichas/${recipe.id}`} className="block">
                           <div className="text-[13px] text-cream">{recipe.name}</div>
                           <div className="mt-0.5 text-[10.5px] text-dim">
-                            {recipe.ingredients.length} insumos · venda {money(recipe.salePriceCents)}
+                            {recipe.ingredients.length} ingredientes
                           </div>
                         </Link>
                       </td>
-                      <td className="text-right num text-[12px] text-muted">
-                        {money(recipe.salePriceCents)}
-                      </td>
                       <td className="text-right num text-[12px] text-cream">{money(cost)}</td>
-                      <td className="text-right num text-[12px] text-cream">
-                        {money(margin.marginCents)}
-                      </td>
                       <td>
-                        <div className="flex items-center gap-2">
-                          <div className="h-[3px] flex-1 bg-line">
-                            <div
-                              className={`h-full ${margin.costPct > 0.35 ? 'bg-copper' : 'bg-line-strong'}`}
-                              style={{ width: `${Math.min(100, margin.costPct * 100)}%` }}
-                            />
-                          </div>
-                          <span
-                            className={`num w-11 text-right text-[10.5px] ${
-                              margin.costPct > 0.35 ? 'text-copper' : 'text-muted'
-                            }`}
-                          >
-                            {(margin.costPct * 100).toFixed(1)}%
-                          </span>
+                        <div className={`num text-right text-[12px] ${margin.costPct > 0.35 ? 'text-warn' : 'text-muted'}`}>
+                          {margin.costPct > 0.35 ? '· ' : ''}{(margin.costPct * 100).toFixed(1)}% do preço de venda
                         </div>
-                      </td>
-                      <td className="text-right num text-[11px] text-muted">
-                        {recipe.ingredients.length}
-                      </td>
-                      <td className="text-right whitespace-nowrap font-mono text-[10.5px] text-dim">
-                        {shortDate(recipe.updatedAt)}
                       </td>
                       <td className="w-8">
                         <ArrowRight size={13} className="text-dim" />
@@ -131,9 +103,7 @@ export function RecipesPage() {
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[13.5px] text-cream">{recipe.name}</div>
-                      <div className="mt-0.5 text-[10.5px] text-dim">
-                        {recipe.ingredients.length} insumos · venda {money(recipe.salePriceCents)}
-                      </div>
+                      <div className="mt-0.5 text-[10.5px] text-dim">{recipe.ingredients.length} ingredientes</div>
                     </div>
                     <div className="text-right">
                       <div className={`num text-[11.5px] ${margin.costPct > 0.35 ? 'text-copper' : 'text-muted'}`}>
@@ -143,12 +113,8 @@ export function RecipesPage() {
                     </div>
                   </div>
                   <div className="mt-2 flex items-center justify-between text-[11px]">
-                    <span className="text-muted">
-                      custo <span className="num text-cream">{money(cost)}</span>
-                    </span>
-                    <span className="text-muted">
-                      margem <span className="num text-cream">{money(margin.marginCents)}</span>
-                    </span>
+                    <span className="text-muted">Custo <span className="num text-cream">{money(cost)}</span></span>
+                    <span className={`num ${margin.costPct > 0.35 ? 'text-warn' : 'text-dim'}`}>{margin.costPct > 0.35 ? '· ' : ''}{(margin.costPct * 100).toFixed(1)}% do preço</span>
                   </div>
                 </Link>
               ))}

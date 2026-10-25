@@ -2,7 +2,7 @@ import { useEffect, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, ArrowUpRight, X } from 'lucide-react';
 import type { ItemStatus, PurchaseStatus } from '../domain/types';
-import { PURCHASE_STATUS_LABEL, STATUS_LABEL } from '../domain/types';
+import { PURCHASE_STATUS_LABEL } from '../domain/types';
 import { money, moneySigned } from '../domain/format';
 
 export function PageHeader({
@@ -76,8 +76,11 @@ export function Panel({
 }
 
 export function StatusTag({ status, className = '' }: { status: ItemStatus; className?: string }) {
+  if (status === 'normal') return null;
   return (
-    <span className={`status status-${status} ${className}`}>{STATUS_LABEL[status]}</span>
+    <span className={`status status-${status} ${className}`}>
+      {status === 'empty' ? '● Sem estoque' : status === 'critical' ? '● Crítico' : '· Atenção'}
+    </span>
   );
 }
 
@@ -90,6 +93,9 @@ const PURCHASE_STATUS_CLASS: Record<PurchaseStatus, string> = {
 };
 
 export function PurchaseStatusTag({ status }: { status: PurchaseStatus }) {
+  if (status === 'received') {
+    return <span className="status status-normal">✓ Recebido</span>;
+  }
   return (
     <span className={`status ${PURCHASE_STATUS_CLASS[status]}`}>
       {PURCHASE_STATUS_LABEL[status]}
