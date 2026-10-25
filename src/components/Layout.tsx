@@ -45,14 +45,12 @@ function Brand() {
   return (
     <div className="px-5 pt-5 pb-4">
       <div className="flex items-center gap-2.5">
-        <span className="grid h-7 w-7 place-items-center border border-copper/50">
-          <span className="grid grid-cols-2 gap-[2px]">
-            <span className="h-[5px] w-[5px] bg-copper" />
-            <span className="h-[5px] w-[5px] bg-copper/40" />
-            <span className="h-[5px] w-[5px] bg-copper/40" />
-            <span className="h-[5px] w-[5px] bg-copper" />
-          </span>
-        </span>
+        <img
+          src="/favicon.png"
+          alt=""
+          aria-hidden="true"
+          className="h-7 w-7 shrink-0 object-contain object-center"
+        />
         <div>
           <div className="text-[15px] font-semibold leading-none tracking-[0.24em] text-cream">
             DACOT
