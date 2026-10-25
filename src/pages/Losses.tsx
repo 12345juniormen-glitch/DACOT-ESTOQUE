@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Plus, TrendingDown } from 'lucide-react';
+import { ArrowLeft, Plus, TrendingDown } from 'lucide-react';
 import { useApp } from '../state/AppStore';
 import {
   lossesMonthCents,
@@ -39,6 +39,16 @@ export function LossesPage() {
     );
     return filter === 'all' ? list : list.filter((loss) => loss.reason === filter);
   }, [state, filter]);
+  const focusedLoss = state.losses.find((loss) => loss.id === params.get('focus'));
+  const visibleLosses = focusedLoss ? [focusedLoss] : monthLosses;
+
+  useEffect(() => {
+    if (!focusedLoss) return;
+    const frame = window.requestAnimationFrame(() => {
+      document.getElementById(`loss-record-${focusedLoss.id}`)?.scrollIntoView({ block: 'center' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusedLoss?.id]);
 
   const totals = {
     month: lossesMonthCents(state),
@@ -144,7 +154,27 @@ export function LossesPage() {
             </select>
           }
         >
-          {monthLosses.length === 0 ? (
+          {focusedLoss ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-raised px-4 py-2.5">
+              <span className="text-[11px] text-muted">
+                Registro localizado{!monthLosses.some((loss) => loss.id === focusedLoss.id) ? ' · fora do mês atual' : ''}.
+              </span>
+              <button
+                type="button"
+                className="inline-flex min-h-9 items-center gap-1.5 text-[11px] text-copper hover:text-copper-hi"
+                onClick={() => {
+                  const next = new URLSearchParams(params);
+                  next.delete('focus');
+                  setParams(next, { replace: true });
+                }}
+              >
+                <ArrowLeft size={13} />
+                Ver todas as perdas
+              </button>
+            </div>
+          ) : null}
+
+          {visibleLosses.length === 0 ? (
             <EmptyState
               icon={<TrendingDown size={18} />}
               title={state.losses.length === 0 ? 'Nenhuma perda registrada' : 'Nenhum registro neste filtro'}
@@ -177,11 +207,11 @@ export function LossesPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {monthLosses.map((loss) => {
+                    {visibleLosses.map((loss) => {
                       const item = state.items.find((i) => i.id === loss.itemId);
                       const user = state.users.find((u) => u.id === loss.userId);
                       return (
-                        <tr key={loss.id}>
+                        <tr key={loss.id} id={`loss-record-${loss.id}`} className={focusedLoss?.id === loss.id ? 'bg-copper/10' : undefined}>
                           <td className="whitespace-nowrap font-mono text-[10.5px] text-dim">
                             {date(loss.at)} · {time(loss.at)}
                           </td>
@@ -205,11 +235,15 @@ export function LossesPage() {
               </div>
 
               <div className="divide-y divide-line md:hidden">
-                {monthLosses.map((loss) => {
+                {visibleLosses.map((loss) => {
                   const item = state.items.find((i) => i.id === loss.itemId);
                   const user = state.users.find((u) => u.id === loss.userId);
                   return (
-                    <div key={loss.id} className="px-4 py-3">
+                    <div
+                      key={loss.id}
+                      id={`loss-record-${loss.id}`}
+                      className={`px-4 py-3 ${focusedLoss?.id === loss.id ? 'bg-copper/10' : ''}`}
+                    >
                       <div className="flex items-start justify-between gap-3">
                         <div>
                           <div className="text-[13px] text-cream">{item?.name ?? '—'}</div>
@@ -234,10 +268,10 @@ export function LossesPage() {
 
               <div className="flex items-center justify-between border-t border-line px-4 py-3">
                 <span className="text-[11px] text-dim">
-                  {monthLosses.length} registros no filtro
+                  {focusedLoss ? '1 registro localizado' : `${monthLosses.length} registros no filtro`}
                 </span>
                 <span className="num text-[13px] text-cream">
-                  {money(monthLosses.reduce((sum, loss) => sum + loss.valueCents, 0))}
+                  {money(visibleLosses.reduce((sum, loss) => sum + loss.valueCents, 0))}
                 </span>
               </div>
             </>

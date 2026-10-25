@@ -17,6 +17,7 @@ import { monthLabel } from '../domain/format';
 import { NOW } from '../domain/clock';
 import { belowMinItems } from '../domain/selectors';
 import { useApp, useCurrentUser } from '../state/AppStore';
+import { GlobalSearch } from './GlobalSearch';
 
 const NAV = [
   {
@@ -169,7 +170,7 @@ function RoleSwitcher() {
       <select
         value={state.currentUserId}
         onChange={(event) => actions.setCurrentUserId(event.target.value)}
-        className="select h-7 w-[176px] border-line bg-[#0b0b0a] px-2 py-0 text-[11px] text-muted hover:text-cream"
+        className="select h-7 w-[124px] border-line bg-[#0b0b0a] px-2 py-0 text-[11px] text-muted hover:text-cream sm:w-[176px]"
         aria-label="Trocar perfil de acesso (demonstração)"
       >
         {state.users.map((user) => (
@@ -205,10 +206,11 @@ function TopBar({ onOpenMenu }: { onOpenMenu: () => void }) {
           </span>
         </div>
       </div>
-      <div className="flex items-center gap-3 sm:gap-4">
+      <div className="flex items-center gap-1.5 sm:gap-3">
         <span className="hidden font-mono text-[10px] uppercase tracking-[0.08em] text-dim xl:inline">
           {monthLabel(NOW)} · {state.restaurant.name}
         </span>
+        <GlobalSearch />
         <RoleSwitcher />
         <span
           className="grid h-7 w-7 place-items-center border border-line bg-raised font-mono text-[10px] text-copper"
