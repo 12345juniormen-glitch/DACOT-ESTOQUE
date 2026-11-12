@@ -92,20 +92,22 @@ export function ReceivePurchasePage() {
   const touched = rows.filter((row) => row.delta > 0).length;
   const completeCount = rows.filter((row) => row.newTotal >= row.line.qtyOrdered - 0.001).length;
 
-  const submit = () => {
+  const submit = async () => {
     if (!can('purchases.receive')) return;
     setConfirming(true);
-    const ok = actions.receivePurchase(
-      purchase.id,
-      purchase.lines.map((line) => ({
-        lineId: line.id,
-        qtyReceived: rows.find((row) => row.line.id === line.id)?.newTotal ?? line.qtyReceived,
-        unitCostCents:
-          parseMoney(priceTexts[line.id] ?? '') || line.expectedUnitCostCents,
-      })),
-    );
-    setConfirming(false);
-    if (ok) navigate(`/compras/${purchase.id}`);
+    try {
+      const ok = await actions.receivePurchase(
+        purchase.id,
+        purchase.lines.map((line) => ({
+          lineId: line.id,
+          qtyReceived: rows.find((row) => row.line.id === line.id)?.newTotal ?? line.qtyReceived,
+          unitCostCents: parseMoney(priceTexts[line.id] ?? '') || line.expectedUnitCostCents,
+        })),
+      );
+      if (ok) navigate(`/compras/${purchase.id}`);
+    } finally {
+      setConfirming(false);
+    }
   };
 
   return (

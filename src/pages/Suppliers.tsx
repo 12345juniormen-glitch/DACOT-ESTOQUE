@@ -22,8 +22,8 @@ export function SuppliersPage() {
   const [minOrder, setMinOrder] = useState('');
   const [notes, setNotes] = useState('');
 
-  const submit = () => {
-    const id = actions.createSupplier({
+  const submit = async () => {
+    const id = await actions.createSupplier({
       name,
       contact,
       phone,

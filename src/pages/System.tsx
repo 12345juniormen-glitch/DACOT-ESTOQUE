@@ -5,7 +5,7 @@ import { useApp, useCurrentUser } from '../state/AppStore';
 import { Panel } from '../components/ui';
 
 export function ForbiddenPage() {
-  const { state, can } = useApp();
+  const { state, can, mode } = useApp();
   const user = useCurrentUser();
   const fallback = can('overview.view')
     ? { to: '/', label: 'Ir para Visão Geral' }
@@ -34,7 +34,7 @@ export function ForbiddenPage() {
         </p>
         <div className="mt-5 border border-line bg-[#0b0b0a] px-3 py-2.5 text-[11px] leading-relaxed text-dim">
           Em produção, o acesso é validado pelo backend com o vínculo do usuário ao restaurante.{' '}
-          {state.restaurant.name} · perfil demonstrativo.
+          {state.restaurant.name} · {mode === 'demo' ? 'perfil demonstrativo.' : 'permissões de escrita também são validadas no servidor.'}
         </div>
         <div className="mt-5 flex flex-wrap items-center gap-2">
           {fallback ? (
@@ -42,9 +42,9 @@ export function ForbiddenPage() {
               {fallback.label}
             </Link>
           ) : null}
-          <span className="text-[10.5px] text-dim">
+          {mode === 'demo' ? <span className="text-[10.5px] text-dim">
             Troque o perfil no topo da tela para simular outro nível de acesso.
-          </span>
+          </span> : null}
         </div>
       </Panel>
     </div>

@@ -73,8 +73,8 @@ export function InventoryPage() {
     setSupplierId('');
   };
 
-  const submit = () => {
-    const id = actions.createItem({
+  const submit = async () => {
+    const id = await actions.createItem({
       name,
       category: newCategory,
       unit,

@@ -69,7 +69,7 @@ function compactAlertDetail(tag: string, detail: string, recommendation?: Recomm
 }
 
 export function OverviewPage() {
-  const { state, actions, can } = useApp();
+  const { state, actions, can, mode } = useApp();
   const [showAllAlerts, setShowAllAlerts] = useState(false);
   const [showIntegrationDetails, setShowIntegrationDetails] = useState(false);
   const user = useCurrentUser();
@@ -264,7 +264,7 @@ export function OverviewPage() {
             title="DACOT Pedidos"
             flush
             bodyClassName=""
-            actions={<span className="status status-normal text-[11px]">Conectado</span>}
+            actions={<span className="status status-normal text-[11px]">{mode === 'demo' ? 'Demonstração' : 'Não integrado'}</span>}
           >
             <div className="flex items-center justify-between gap-3 px-4 py-3">
               <span className="text-[11.5px] text-muted">{eventsToday} pedidos processados hoje</span>
@@ -275,11 +275,11 @@ export function OverviewPage() {
             {showIntegrationDetails ? <div className="border-t border-line px-4 py-3">
               <p className="text-[11px] leading-relaxed text-muted">Pedido entregue → ficha técnica → consumo. Cada evento é processado uma única vez pelo ID.</p>
               <div className="mt-2 text-[10px] text-dim">Último evento: <span className="font-mono text-muted">{lastEvent?.orderId ?? 'sem eventos'}</span>{lastEvent ? ` · ${time(lastEvent.occurredAt)}` : ''}</div>
-              <p className="mt-1 text-[10px] text-dim">Ambiente demonstrativo · processamento local</p>
-              <div className="mt-3 flex flex-wrap gap-2">
+              <p className="mt-1 text-[10px] text-dim">{mode === 'demo' ? 'Ambiente demonstrativo · processamento local' : 'Integração de consumo com DACOT Pedidos ainda não habilitada'}</p>
+              {mode === 'demo' ? <div className="mt-3 flex flex-wrap gap-2">
                 {can('overview.view') ? <button type="button" className="btn btn-ghost btn-sm" onClick={actions.simulateOrderDelivered}><Zap size={12} />Simular entrega</button> : null}
                 <button type="button" className="btn btn-quiet btn-sm" onClick={actions.replayLastEvent} title="Reprocessar o último evento para verificar idempotência"><RefreshCcw size={12} />Reprocessar</button>
-              </div>
+              </div> : null}
             </div> : null}
           </Panel>
         </div>
@@ -390,8 +390,8 @@ export function OverviewPage() {
       </div>
 
       <p className="mt-4 text-[10px] text-dim">
-        Dados de demonstração · {state.restaurant.name} · atualizado em {date(NOW_ISO)} às{' '}
-        {time(NOW_ISO)}. Todos os valores em reais, calculados sobre custo atual.
+        {mode === 'demo' ? 'Dados de demonstração' : 'Dados persistidos na API'} · {state.restaurant.name}
+        {mode === 'demo' ? <> · atualizado em {date(NOW_ISO)} às {time(NOW_ISO)}</> : null}. Todos os valores em reais, calculados sobre custo atual.
       </p>
     </div>
   );

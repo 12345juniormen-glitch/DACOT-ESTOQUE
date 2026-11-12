@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -12,6 +13,9 @@ import { money, qty as fmtQty } from '../domain/format';
 import { createDemoState } from '../domain/demo';
 import { can as roleCan, type Permission } from '../domain/permissions';
 import { recipeCostCents } from '../domain/selectors';
+import { APP_MODE, createApiIngredient, createApiPurchase, createApiSupplier, exchangeHandoffFromUrl,
+  loadRealState, recordApiMovement, saveApiRecipe,
+  receiveApiPurchase, setApiPurchaseStatus, toRole } from '../lib/api';
 import type {
   AppState,
   AuditAction,
@@ -23,6 +27,7 @@ import type {
   Movement,
   Purchase,
   PurchaseStatus,
+  Recipe,
   Supplier,
   Unit,
 } from '../domain/types';
@@ -57,43 +62,54 @@ export interface NewPurchaseInput {
 
 interface AppContextValue {
   state: AppState;
+  mode: 'demo' | 'production';
+  ready: boolean;
+  startupError: string | null;
   toast: ToastState | null;
   can: (permission: Permission) => boolean;
   notify: (message: string, tone?: 'ok' | 'error') => void;
   actions: {
     setCurrentUserId: (id: string) => void;
     resetDemo: () => void;
-    createItem: (input: NewItemInput) => string | null;
+    createItem: (input: NewItemInput) => string | null | Promise<string | null>;
     recordMovement: (input: {
       itemId: string;
       kind: 'in' | 'out' | 'adjust';
       qty: number;
       reason: string;
-    }) => boolean;
+    }) => boolean | Promise<boolean>;
     registerLoss: (input: {
       itemId: string;
       qty: number;
       reason: LossReason;
       note: string;
     }) => boolean;
-    createSupplier: (input: Omit<Supplier, 'id' | 'restaurantId' | 'createdAt'>) => string | null;
+    createSupplier: (input: Omit<Supplier, 'id' | 'restaurantId' | 'createdAt'>) => string | null | Promise<string | null>;
     createCount: (itemIds: string[]) => string | null;
     setCountQty: (countId: string, itemId: string, countedQty: number | null) => void;
     approveCount: (countId: string) => boolean;
-    createPurchase: (input: NewPurchaseInput) => string | null;
-    requestPurchase: (purchaseId: string) => boolean;
-    cancelPurchase: (purchaseId: string) => boolean;
-    receivePurchase: (purchaseId: string, receipts: ReceiveLineInput[]) => boolean;
-    addRecipeIngredient: (recipeId: string, itemId: string, qty: number, unit: Unit) => boolean;
-    updateRecipeIngredient: (recipeId: string, itemId: string, qty: number) => boolean;
-    removeRecipeIngredient: (recipeId: string, itemId: string) => void;
-    updateRecipePrice: (recipeId: string, salePriceCents: Cents) => boolean;
+    createPurchase: (input: NewPurchaseInput) => string | null | Promise<string | null>;
+    requestPurchase: (purchaseId: string) => boolean | Promise<boolean>;
+    cancelPurchase: (purchaseId: string) => boolean | Promise<boolean>;
+    receivePurchase: (purchaseId: string, receipts: ReceiveLineInput[]) => boolean | Promise<boolean>;
+    addRecipeIngredient: (recipeId: string, itemId: string, qty: number, unit: Unit) => boolean | Promise<boolean>;
+    updateRecipeIngredient: (recipeId: string, itemId: string, qty: number) => boolean | Promise<boolean>;
+    removeRecipeIngredient: (recipeId: string, itemId: string) => void | Promise<boolean>;
+    updateRecipePrice: (recipeId: string, salePriceCents: Cents) => boolean | Promise<boolean>;
     simulateOrderDelivered: () => void;
     replayLastEvent: () => void;
   };
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+
+function emptyState(): AppState {
+  return {
+    restaurant: { id: '', name: 'Restaurante', city: '' }, users: [], currentUserId: '',
+    suppliers: [], supplierItems: [], items: [], purchases: [], recipes: [], recipeSnapshots: [],
+    counts: [], losses: [], movements: [], pricePoints: [], audit: [], events: [], processedEventIds: [],
+  };
+}
 
 const nowISO = () => new Date().toISOString();
 const uid = (prefix: string) =>
@@ -131,9 +147,45 @@ function auditEntry(
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<AppState>(() => createDemoState());
+  const [state, setState] = useState<AppState>(() => APP_MODE === 'demo' ? createDemoState() : emptyState());
+  const [ready, setReady] = useState(APP_MODE === 'demo');
+  const [startupError, setStartupError] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const timer = useRef<number | undefined>(undefined);
+  const startupStarted = useRef(false);
+
+  const syncFromApi = useCallback(async () => {
+    const snapshot = await loadRealState();
+    const me = snapshot.me;
+    const role = toRole(me.role);
+    setState((previous) => ({
+      ...previous,
+      restaurant: { id: me.restaurant_id, name: me.restaurant_slug || 'Restaurante', city: '' },
+      users: [{ id: me.user_id, restaurantId: me.restaurant_id, name: 'Usuário DACOT', role,
+        initials: 'DC' }],
+      currentUserId: me.user_id,
+      items: snapshot.items,
+      purchases: snapshot.purchases,
+      movements: snapshot.movements,
+      recipes: snapshot.recipes,
+      suppliers: snapshot.suppliers,
+    }));
+  }, []);
+
+  useEffect(() => {
+    if (APP_MODE !== 'production' || startupStarted.current) return;
+    startupStarted.current = true;
+    void (async () => {
+      try {
+        await exchangeHandoffFromUrl();
+        await syncFromApi();
+      } catch (error) {
+        setStartupError(error instanceof Error ? error.message : 'Não foi possível conectar ao backend.');
+      } finally {
+        setReady(true);
+      }
+    })();
+  }, [syncFromApi]);
 
   const notify = useCallback((message: string, tone: 'ok' | 'error' = 'ok') => {
     setToast({ message, tone });
@@ -143,29 +195,64 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const currentUser = state.users.find((u) => u.id === state.currentUserId) ?? state.users[0];
   const can = useCallback(
-    (permission: Permission) => roleCan(currentUser.role, permission),
-    [currentUser.role],
+    (permission: Permission) => roleCan(currentUser?.role ?? 'operator', permission),
+    [currentUser?.role],
   );
 
   const actions = useMemo(() => {
     const require = (permission: Permission) => {
-      if (!roleCan(currentUser.role, permission)) {
+      if (!roleCan(currentUser?.role ?? 'operator', permission)) {
         notify('Seu perfil não tem permissão para esta ação.', 'error');
         return false;
       }
       return true;
     };
 
+    const requireDemo = (permission: Permission) => {
+      if (!require(permission)) return false;
+      if (APP_MODE === 'production') {
+        notify('Esta operação ainda não está conectada ao backend.', 'error');
+        return false;
+      }
+      return true;
+    };
+
+    const persistRecipe = async (recipe: Recipe): Promise<boolean> => {
+      try {
+        await saveApiRecipe(recipe);
+        await syncFromApi();
+        notify('Ficha técnica atualizada e salva.');
+        return true;
+      } catch (error) {
+        notify(error instanceof Error ? error.message : 'Falha ao salvar ficha técnica.', 'error');
+        return false;
+      }
+    };
+
     return {
-      setCurrentUserId: (id: string) => setState((prev) => ({ ...prev, currentUserId: id })),
+      setCurrentUserId: (id: string) => {
+        if (APP_MODE === 'demo') setState((prev) => ({ ...prev, currentUserId: id }));
+      },
 
       resetDemo: () => {
-        setState(createDemoState());
-        notify('Dados de demonstração restaurados.');
+        if (APP_MODE === 'demo') {
+          setState(createDemoState());
+          notify('Dados de demonstração restaurados.');
+        }
       },
 
       createItem: (input: NewItemInput) => {
         if (!require('stock.create')) return null;
+        if (APP_MODE === 'production') {
+          return createApiIngredient(input).then(async (created) => {
+            await syncFromApi();
+            notify(`${created.name} cadastrado no estoque.`);
+            return created._id;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao cadastrar insumo.', 'error');
+            return null;
+          });
+        }
         const name = input.name.trim();
         if (!name) {
           notify('Informe o nome do insumo.', 'error');
@@ -257,6 +344,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!require('stock.adjust')) return false;
         const item = state.items.find((i) => i.id === input.itemId);
         if (!item) return false;
+        if (APP_MODE === 'production') {
+          if (!input.reason.trim()) {
+            notify('Descreva o motivo da movimentação.', 'error');
+            return false;
+          }
+          if (!Number.isFinite(input.qty) || input.qty < 0
+              || (input.kind !== 'adjust' && input.qty <= 0)
+              || (input.kind === 'adjust' && Math.abs(input.qty - item.currentQty) < 0.0001)) {
+            notify('Informe uma quantidade válida.', 'error');
+            return false;
+          }
+          return recordApiMovement({ ...input, currentQty: item.currentQty }).then(async () => {
+            await syncFromApi();
+            notify(`Estoque de ${item.name} atualizado.`);
+            return true;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao movimentar estoque.', 'error');
+            return false;
+          });
+        }
         if (!Number.isFinite(input.qty) || input.qty < 0) {
           notify('Informe uma quantidade válida.', 'error');
           return false;
@@ -338,7 +445,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         reason: LossReason;
         note: string;
       }) => {
-        if (!require('losses.manage')) return false;
+        if (!requireDemo('losses.manage')) return false;
         const item = state.items.find((i) => i.id === input.itemId);
         if (!item) return false;
         if (!Number.isFinite(input.qty) || input.qty <= 0) {
@@ -409,6 +516,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       createSupplier: (input: Omit<Supplier, 'id' | 'restaurantId' | 'createdAt'>) => {
         if (!require('suppliers.manage')) return null;
+        if (APP_MODE === 'production') {
+          return createApiSupplier(input).then(async (created) => {
+            await syncFromApi();
+            notify(`${created.name} cadastrado.`);
+            return created.id;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao cadastrar fornecedor.', 'error');
+            return null;
+          });
+        }
         if (!input.name.trim()) {
           notify('Informe o nome do fornecedor.', 'error');
           return null;
@@ -433,7 +550,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       },
 
       createCount: (itemIds: string[]) => {
-        if (!require('count.perform')) return null;
+        if (!requireDemo('count.perform')) return null;
         if (itemIds.length === 0) {
           notify('Selecione ao menos um item para contar.', 'error');
           return null;
@@ -489,7 +606,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       },
 
       approveCount: (countId: string) => {
-        if (!require('count.approve')) return false;
+        if (!requireDemo('count.approve')) return false;
         const count = state.counts.find((c) => c.id === countId);
         if (!count) return false;
         const missing = count.lines.filter((l) => l.countedQty == null);
@@ -575,6 +692,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
           notify('Todas as quantidades devem ser maiores que zero.', 'error');
           return null;
         }
+        if (APP_MODE === 'production') {
+          return createApiPurchase({ ...input, lines: input.lines.map((line) => ({
+            ...line, unit: state.items.find((item) => item.id === line.itemId)?.unit ?? 'un',
+          })) }).then(async (created) => {
+            await syncFromApi();
+            notify(`Pedido ${created.code} criado como rascunho.`);
+            return created._id;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao criar compra.', 'error');
+            return null;
+          });
+        }
         const code = nextCode(
           state.purchases.map((p) => p.code),
           'PC',
@@ -625,6 +754,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       requestPurchase: (purchaseId: string) => {
         if (!require('purchases.manage')) return false;
+        if (APP_MODE === 'production') {
+          return setApiPurchaseStatus(purchaseId, 'request').then(async () => {
+            await syncFromApi();
+            notify('Pedido enviado ao fornecedor.');
+            return true;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao solicitar compra.', 'error');
+            return false;
+          });
+        }
         const purchase = state.purchases.find((p) => p.id === purchaseId);
         if (!purchase) return false;
         setState({
@@ -639,6 +778,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       cancelPurchase: (purchaseId: string) => {
         if (!require('purchases.manage')) return false;
+        if (APP_MODE === 'production') {
+          return setApiPurchaseStatus(purchaseId, 'cancel').then(async () => {
+            await syncFromApi();
+            notify('Pedido cancelado.');
+            return true;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao cancelar compra.', 'error');
+            return false;
+          });
+        }
         const purchase = state.purchases.find((p) => p.id === purchaseId);
         if (!purchase) return false;
         if (purchase.status === 'received') {
@@ -671,6 +820,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (!require('purchases.receive')) return false;
         const purchase = state.purchases.find((p) => p.id === purchaseId);
         if (!purchase) return false;
+        if (APP_MODE === 'production') {
+          return receiveApiPurchase(purchase, receipts).then(async () => {
+            await syncFromApi();
+            notify(`Recebimento do pedido ${purchase.code} registrado.`);
+            return true;
+          }).catch((error: unknown) => {
+            notify(error instanceof Error ? error.message : 'Falha ao registrar recebimento.', 'error');
+            return false;
+          });
+        }
         if (purchase.status === 'received' || purchase.status === 'cancelled') {
           notify('Este pedido não está disponível para recebimento.', 'error');
           return false;
@@ -844,6 +1003,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           notify('Esse insumo já está na ficha técnica.', 'error');
           return false;
         }
+        if (APP_MODE === 'production') {
+          return persistRecipe({ ...recipe, ingredients: [...recipe.ingredients, { itemId, qty, unit }],
+            updatedAt: nowISO() });
+        }
         const at = nowISO();
         const nextState: AppState = {
           ...state,
@@ -890,6 +1053,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (qty <= 0) {
           notify('Informe uma quantidade maior que zero.', 'error');
           return false;
+        }
+        const currentRecipe = state.recipes.find((r) => r.id === recipeId);
+        if (!currentRecipe) return false;
+        if (APP_MODE === 'production') {
+          return persistRecipe({ ...currentRecipe,
+            ingredients: currentRecipe.ingredients.map((line) => line.itemId === itemId ? { ...line, qty } : line),
+            updatedAt: nowISO() });
         }
         const at = nowISO();
         const nextState: AppState = {
@@ -938,6 +1108,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       removeRecipeIngredient: (recipeId: string, itemId: string) => {
         if (!require('recipes.manage')) return;
+        const currentRecipe = state.recipes.find((r) => r.id === recipeId);
+        if (!currentRecipe) return;
+        if (APP_MODE === 'production') {
+          const ingredients = currentRecipe.ingredients.filter((line) => line.itemId !== itemId);
+          if (!ingredients.length) {
+            notify('A ficha precisa ter ao menos um insumo.', 'error');
+            return Promise.resolve(false);
+          }
+          return persistRecipe({ ...currentRecipe, ingredients, updatedAt: nowISO() });
+        }
         const at = nowISO();
         const recipe = state.recipes.find((r) => r.id === recipeId);
         if (!recipe) return;
@@ -988,6 +1168,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         const recipe = state.recipes.find((r) => r.id === recipeId);
         if (!recipe) return false;
+        if (APP_MODE === 'production') {
+          return persistRecipe({ ...recipe, salePriceCents, updatedAt: nowISO() });
+        }
         const at = nowISO();
         const nextState: AppState = {
           ...state,
@@ -1028,7 +1211,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       },
 
       simulateOrderDelivered: () => {
-        if (!require('overview.view')) return;
+        if (!requireDemo('overview.view')) return;
         const mix = [
           { recipeId: 'rc-xburger', qty: 2 },
           { recipeId: 'rc-batata', qty: 1 },
@@ -1071,10 +1254,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       },
     };
-  }, [state, currentUser.role, notify]);
+  }, [state, currentUser?.role, notify, syncFromApi]);
 
   const value: AppContextValue = {
     state,
+    mode: APP_MODE,
+    ready,
+    startupError,
     toast,
     can,
     notify,
@@ -1092,5 +1278,6 @@ export function useApp(): AppContextValue {
 
 export function useCurrentUser() {
   const { state } = useApp();
-  return state.users.find((u) => u.id === state.currentUserId) ?? state.users[0];
+  return state.users.find((u) => u.id === state.currentUserId) ?? state.users[0]
+    ?? { id: '', restaurantId: '', name: 'Usuário DACOT', role: 'operator' as const, initials: 'DC' };
 }

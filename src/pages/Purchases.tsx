@@ -113,8 +113,8 @@ export function PurchasesPage() {
     setPriceText('');
   };
 
-  const create = () => {
-    const id = actions.createPurchase({
+  const create = async () => {
+    const id = await actions.createPurchase({
       supplierId,
       expectedDeliveryAt: expectedDate ? `${expectedDate}T12:00:00-03:00` : null,
       note,

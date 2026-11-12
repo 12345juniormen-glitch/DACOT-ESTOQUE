@@ -32,12 +32,34 @@ function ScrollToTop() {
   return null;
 }
 
+function RuntimeGate({ children }: { children: ReactNode }) {
+  const { mode, ready, startupError } = useApp();
+  if (mode === 'production' && !ready) {
+    return <main className="grid min-h-screen place-items-center bg-base px-6 text-sm text-muted">Conectando ao DACOT Estoque…</main>;
+  }
+  if (mode === 'production' && startupError) {
+    return (
+      <main className="grid min-h-screen place-items-center bg-base px-6 text-center">
+        <div className="max-w-md">
+          <h1 className="text-lg font-semibold text-cream">Não foi possível abrir o Estoque</h1>
+          <p className="mt-2 text-sm text-muted">{startupError}</p>
+          <button type="button" className="btn btn-primary mt-5" onClick={() => window.location.reload()}>
+            Tentar novamente
+          </button>
+        </div>
+      </main>
+    );
+  }
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
     <AppProvider>
       <BrowserRouter>
-        <ScrollToTop />
-        <Routes>
+        <RuntimeGate>
+          <ScrollToTop />
+          <Routes>
           <Route element={<AppShell />}>
             <Route
               index
@@ -145,7 +167,8 @@ export default function App() {
             />
             <Route path="*" element={<NotFoundPage />} />
           </Route>
-        </Routes>
+          </Routes>
+        </RuntimeGate>
       </BrowserRouter>
     </AppProvider>
   );

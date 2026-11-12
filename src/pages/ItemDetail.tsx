@@ -111,12 +111,12 @@ export function ItemDetailPage() {
       ? typedQty
       : Math.round((item.currentQty + (kind === 'in' ? typedQty : -typedQty)) * 1000) / 1000;
 
-  const submitMovement = () => {
+  const submitMovement = async () => {
     if (kind === 'adjust') {
       setConfirmAdjust(true);
       return;
     }
-    const ok = actions.recordMovement({
+    const ok = await actions.recordMovement({
       itemId: item.id,
       kind,
       qty: Math.round((Number(quantity.replace(',', '.')) || 0) * 1000) / 1000,
@@ -770,8 +770,8 @@ export function ItemDetailPage() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => {
-                const ok = actions.recordMovement({
+              onClick={async () => {
+                const ok = await actions.recordMovement({
                   itemId: item.id,
                   kind: 'adjust',
                   qty: Math.round((Number(quantity.replace(',', '.')) || 0) * 1000) / 1000,

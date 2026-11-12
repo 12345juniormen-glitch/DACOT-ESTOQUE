@@ -1,6 +1,8 @@
 node_modules
 dist
 dist-ssr
+backend/.venv/
+backend/**/__pycache__/
 *.local
 *.log
 .env

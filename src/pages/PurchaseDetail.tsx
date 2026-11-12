@@ -413,8 +413,8 @@ export function PurchaseDetailPage() {
             <button
               type="button"
               className="btn btn-danger"
-              onClick={() => {
-                const ok = actions.cancelPurchase(purchase.id);
+              onClick={async () => {
+                const ok = await actions.cancelPurchase(purchase.id);
                 if (ok) setCancelOpen(false);
               }}
             >

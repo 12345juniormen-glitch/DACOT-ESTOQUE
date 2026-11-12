@@ -184,7 +184,7 @@ function RoleSwitcher() {
 }
 
 function TopBar({ onOpenMenu }: { onOpenMenu: () => void }) {
-  const { state } = useApp();
+  const { state, mode } = useApp();
   const user = useCurrentUser();
   return (
     <div className="sticky top-0 z-30 flex h-12 items-center justify-between border-b border-line bg-base px-4 sm:px-6">
@@ -211,7 +211,7 @@ function TopBar({ onOpenMenu }: { onOpenMenu: () => void }) {
           {monthLabel(NOW)} · {state.restaurant.name}
         </span>
         <GlobalSearch />
-        <RoleSwitcher />
+        {mode === 'demo' ? <RoleSwitcher /> : null}
         <span
           className="grid h-7 w-7 place-items-center border border-line bg-raised font-mono text-[10px] text-copper"
           title={`${user.name} · ${ROLE_LABEL[user.role]}`}
@@ -246,6 +246,7 @@ function Toast() {
 }
 
 export function AppShell() {
+  const { mode } = useApp();
   const [mobileOpen, setMobileOpen] = useState(false);
   const location = useLocation();
 
@@ -288,7 +289,7 @@ export function AppShell() {
         </main>
         <footer className="mx-auto flex w-full max-w-[1460px] flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-5 text-[10.5px] text-dim sm:px-6 xl:px-8">
           <span>DACOT · Plataforma operacional para restaurantes</span>
-          <span className="font-mono">Estoque &amp; Compras · v1.0 · dados de demonstração</span>
+          <span className="font-mono">Estoque &amp; Compras · v1.0 · {mode === 'demo' ? 'dados de demonstração' : 'dados persistidos'}</span>
         </footer>
       </div>
       <Toast />

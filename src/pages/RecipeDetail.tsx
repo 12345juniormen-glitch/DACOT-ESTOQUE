@@ -410,13 +410,13 @@ export function RecipeDetailPage() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => {
-                const ok = actions.addRecipeIngredient(
+              onClick={async () => {
+                const ok = await Promise.resolve(actions.addRecipeIngredient(
                   recipe.id,
                   newItemId,
                   parseQty(newQty),
                   newUnit,
-                );
+                ));
                 if (ok) {
                   setAddOpen(false);
                   setNewItemId('');
@@ -496,9 +496,9 @@ export function RecipeDetailPage() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => {
+              onClick={async () => {
                 if (!editItemId) return;
-                const ok = actions.updateRecipeIngredient(recipe.id, editItemId, parseQty(editQty));
+                const ok = await Promise.resolve(actions.updateRecipeIngredient(recipe.id, editItemId, parseQty(editQty)));
                 if (ok) setEditItemId(null);
               }}
             >
@@ -534,8 +534,8 @@ export function RecipeDetailPage() {
             <button
               type="button"
               className="btn btn-primary"
-              onClick={() => {
-                const ok = actions.updateRecipePrice(recipe.id, parseMoney(priceText));
+              onClick={async () => {
+                const ok = await Promise.resolve(actions.updateRecipePrice(recipe.id, parseMoney(priceText)));
                 if (ok) setPriceOpen(false);
               }}
             >
@@ -571,9 +571,10 @@ export function RecipeDetailPage() {
             <button
               type="button"
               className="btn btn-danger"
-              onClick={() => {
-                if (removeItemId) actions.removeRecipeIngredient(recipe.id, removeItemId);
-                setRemoveItemId(null);
+              onClick={async () => {
+                if (!removeItemId) return;
+                const result = await Promise.resolve(actions.removeRecipeIngredient(recipe.id, removeItemId));
+                if (result !== false) setRemoveItemId(null);
               }}
             >
               Remover
