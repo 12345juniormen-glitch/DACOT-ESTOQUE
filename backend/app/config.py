@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import field_validator, model_validator
@@ -7,8 +7,8 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    environment: str = "development"
-    mongodb_uri: str = "mongodb://localhost:27017"
+    environment: Literal["development", "test", "production"] = "development"
+    mongodb_uri: str = "mongodb://localhost:27017/dacot_estoque?replicaSet=rs0"
     mongodb_database: str = "dacot_estoque"
     handoff_jwt_secret: str | None = None
     handoff_issuer: str = "dacot-hub"
@@ -25,6 +25,19 @@ class Settings(BaseSettings):
             raise ValueError("HANDOFF_ISSUER must be dacot-hub")
         if self.handoff_audience != "dacot-estoque":
             raise ValueError("HANDOFF_AUDIENCE must be dacot-estoque")
+        if self.hub_base_url:
+            try:
+                parsed_hub = urlsplit(self.hub_base_url)
+                _ = parsed_hub.port
+            except ValueError as exc:
+                raise ValueError("HUB_BASE_URL is invalid") from exc
+            if (self.hub_base_url != self.hub_base_url.strip()
+                    or parsed_hub.scheme not in {"http", "https"} or not parsed_hub.hostname
+                    or parsed_hub.username or parsed_hub.password or parsed_hub.query
+                    or parsed_hub.fragment or parsed_hub.path not in {"", "/"}):
+                raise ValueError("HUB_BASE_URL must be an origin without credentials, path, query or fragment")
+            if self.environment == "production" and parsed_hub.scheme != "https":
+                raise ValueError("HUB_BASE_URL must use HTTPS in production")
         if self.environment == "production" and not self.cors_origins:
             raise ValueError("CORS_ORIGINS must contain the exact frontend origin in production")
         canonical_origins = set()

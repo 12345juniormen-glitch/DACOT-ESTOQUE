@@ -2,8 +2,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Info, Lock, PackageCheck } from 'lucide-react';
 import { useApp } from '../state/AppStore';
+import { useEnsureIngredients } from '../hooks/useEnsureIngredients';
+import { fetchApiPurchase, fetchApiSupplier, listApiPurchaseReceipts, pendingApiReceiptPayload,
+  type PurchaseReceiptRecord } from '../lib/api';
 import { purchaseTotalCents } from '../domain/selectors';
-import { money, moneyInput, parseMoney, parseQty, qty as fmtQty } from '../domain/format';
+import { parsePendingReceiptLines, receiptHistoryMatchesPurchase, receiptQuantityDelta,
+  summarizePurchaseReceipts } from '../domain/receipts';
+import { money, moneyInput, parseMoneyInput, qty as fmtQty } from '../domain/format';
 import {
   BackLink,
   EmptyState,
@@ -17,29 +22,83 @@ import {
 export function ReceivePurchasePage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { state, actions, can } = useApp();
+  const { state, actions, can, mode } = useApp();
   const purchase = state.purchases.find((p) => p.id === id);
+  const ingredientHydration = useEnsureIngredients(purchase?.lines.map((line) => line.itemId) ?? []);
   const [confirming, setConfirming] = useState(false);
+  const [receiptHistory, setReceiptHistory] = useState<PurchaseReceiptRecord[]>([]);
+  const [receiptHistoryLoading, setReceiptHistoryLoading] = useState(mode === 'production');
+  const [receiptHistoryError, setReceiptHistoryError] = useState<string | null>(null);
+  const [receiptHistoryRetry, setReceiptHistoryRetry] = useState(0);
+  const [purchaseLookup, setPurchaseLookup] = useState<{ id: string | undefined; loading: boolean }>({
+    id: undefined, loading: false,
+  });
+
+  useEffect(() => {
+    if (mode !== 'production' || !id || purchase) return;
+    let active = true;
+    setPurchaseLookup({ id, loading: true });
+    void fetchApiPurchase(id).then((loaded) => { if (active) actions.cachePurchase(loaded); })
+      .catch(() => { /* Empty-state handles missing or inaccessible purchase. */ })
+      .finally(() => { if (active) setPurchaseLookup({ id, loading: false }); });
+    return () => { active = false; };
+  }, [mode, id, purchase, actions]);
+
+  useEffect(() => {
+    if (mode !== 'production' || !id || !purchase) return;
+    let active = true;
+    setReceiptHistoryLoading(true);
+    setReceiptHistoryError(null);
+    listApiPurchaseReceipts(id).then((records) => {
+      if (active) setReceiptHistory(records);
+    }).catch((error: unknown) => {
+      if (active) setReceiptHistoryError(error instanceof Error ? error.message : 'Falha ao consultar preços recebidos.');
+    }).finally(() => {
+      if (active) setReceiptHistoryLoading(false);
+    });
+    return () => { active = false; };
+  }, [mode, id, purchase?.version, receiptHistoryRetry]);
+
+  useEffect(() => {
+    if (mode !== 'production' || !purchase?.supplierId
+        || state.suppliers.some((supplier) => supplier.id === purchase.supplierId)) return;
+    let active = true;
+    void fetchApiSupplier(purchase.supplierId).then((supplier) => {
+      if (active) actions.cacheSupplier(supplier);
+    }).catch(() => { /* The order can still be received if the supplier record is unavailable. */ });
+    return () => { active = false; };
+  }, [mode, purchase?.supplierId, state.suppliers, actions]);
 
   const initial = useMemo(() => {
     if (!purchase) return { qty: {} as Record<string, string>, price: {} as Record<string, string> };
-    return {
-      qty: Object.fromEntries(
+    const qty = Object.fromEntries(
         purchase.lines.map((line) => [
           line.id,
           line.qtyReceived >= line.qtyOrdered - 0.001
             ? '0'
             : String(Math.round((line.qtyOrdered - line.qtyReceived) * 1000) / 1000).replace('.', ','),
         ]),
-      ),
-      price: Object.fromEntries(
+      ) as Record<string, string>;
+    const price = Object.fromEntries(
         purchase.lines.map((line) => [
           line.id,
-          moneyInput(line.receivedUnitCostCents ?? line.expectedUnitCostCents),
+          '',
         ]),
-      ),
-    };
-  }, [purchase?.id]);
+      ) as Record<string, string>;
+    const pending = pendingApiReceiptPayload(purchase);
+    if (pending) {
+      const pendingLines = parsePendingReceiptLines(pending);
+      if (pendingLines) {
+        for (const line of purchase.lines) qty[line.id] = '0';
+        for (const receiptLine of pendingLines) {
+          if (!Object.hasOwn(qty, receiptLine.line_id)) continue;
+          qty[receiptLine.line_id] = String(receiptLine.quantity_received).replace('.', ',');
+          price[receiptLine.line_id] = moneyInput(receiptLine.unit_cost_cents);
+        }
+      }
+    }
+    return { qty, price };
+  }, [purchase?.id, purchase?.version, purchase?.updatedAt]);
 
   const [qtyTexts, setQtyTexts] = useState<Record<string, string>>(initial.qty);
   const [priceTexts, setPriceTexts] = useState<Record<string, string>>(initial.price);
@@ -54,46 +113,75 @@ export function ReceivePurchasePage() {
       <div>
         <BackLink to="/compras">Compras</BackLink>
         <Panel>
-          <EmptyState
+          {mode === 'production' && (purchaseLookup.id !== id || purchaseLookup.loading)
+            ? <div className="p-5 text-sm text-dim" role="status">Carregando pedido…</div> : null}
+          {mode === 'production' && purchaseLookup.id === id && !purchaseLookup.loading ? <EmptyState
             icon={<Info size={18} />}
             title="Pedido não encontrado"
             description="Não foi possível localizar este pedido para recebimento."
-            action={
-              <Link to="/compras" className="btn btn-ghost">
-                Voltar para compras
-              </Link>
-            }
-          />
+            action={<Link to="/compras" className="btn btn-ghost">Voltar para compras</Link>}
+          /> : null}
+          {mode !== 'production' ? <EmptyState
+            icon={<Info size={18} />}
+            title="Pedido não encontrado"
+            description="Não foi possível localizar este pedido para recebimento."
+            action={<Link to="/compras" className="btn btn-ghost">Voltar para compras</Link>}
+          /> : null}
         </Panel>
       </div>
     );
   }
 
+  if (ingredientHydration.loading) {
+    return <div><BackLink to="/compras">Compras</BackLink><Panel><div className="px-5 py-8 text-center text-[12px] text-dim" role="status">Carregando os insumos do pedido…</div></Panel></div>;
+  }
+  if (ingredientHydration.error) {
+    return <div><BackLink to="/compras">Compras</BackLink><Panel><EmptyState icon={<Info size={18} />}
+      title="Não foi possível carregar os insumos" description={ingredientHydration.error}
+      action={<button type="button" className="btn btn-ghost" onClick={ingredientHydration.retry}>Tentar novamente</button>} /></Panel></div>;
+  }
+
   const supplier = state.suppliers.find((s) => s.id === purchase.supplierId);
   const expectedTotal = purchaseTotalCents(purchase);
+  const receiptSummary = summarizePurchaseReceipts(receiptHistory);
+  const receiptHistoryMatches = receiptHistoryMatchesPurchase(receiptHistory, purchase.lines);
+  const hasPriorReceipts = purchase.lines.some((line) => line.qtyReceived > 0);
   const rows = purchase.lines.map((line) => {
     const item = state.items.find((i) => i.id === line.itemId);
     const remaining = Math.max(0, line.qtyOrdered - line.qtyReceived);
-    const delta = Math.min(remaining, Math.max(0, parseQty(qtyTexts[line.id] ?? '0')));
-    const price = parseMoney(priceTexts[line.id] ?? '') || line.expectedUnitCostCents;
+    const quantity = receiptQuantityDelta(qtyTexts[line.id] ?? '0', remaining);
+    const delta = quantity.quantity;
+    const parsedPrice = parseMoneyInput(priceTexts[line.id] ?? '');
+    const price = parsedPrice ?? line.expectedUnitCostCents;
     const newTotal = line.qtyReceived + delta;
     const priceDelta = line.expectedUnitCostCents
       ? (price - line.expectedUnitCostCents) / line.expectedUnitCostCents
       : 0;
-    return { line, item, remaining, delta, price, newTotal, priceDelta };
+    const invalidPrice = delta > 0 && (parsedPrice === null || parsedPrice < 0);
+    const priorReceiptTotal = mode === 'production'
+      ? (receiptHistoryMatches ? receiptSummary[line.id]?.totalCents ?? 0 : null)
+      : line.qtyReceived > 0
+        ? Math.round(line.qtyReceived * (line.receivedUnitCostCents ?? line.expectedUnitCostCents)) : 0;
+    return { line, item, remaining, delta, price, priceDelta,
+      invalidQuantity: quantity.invalid, newTotal, invalidPrice, priorReceiptTotal };
   });
 
   const deliveryTotal = rows.reduce((sum, row) => sum + Math.round(row.delta * row.price), 0);
-  const finalTotal = rows.reduce((sum, row) => sum + Math.round(row.newTotal * row.price), 0);
+  const finalTotal = rows.every((row) => row.priorReceiptTotal !== null)
+    ? rows.reduce((sum, row) => sum + (row.priorReceiptTotal ?? 0) + Math.round(row.delta * row.price), 0)
+    : null;
   const priceImpact = rows.reduce((sum, row) => {
     if (row.delta <= 0) return sum;
     return sum + Math.round(row.delta * (row.price - row.line.expectedUnitCostCents));
   }, 0);
   const touched = rows.filter((row) => row.delta > 0).length;
+  const invalidPriceCount = rows.filter((row) => row.invalidPrice).length;
+  const invalidQuantityCount = rows.filter((row) => row.invalidQuantity).length;
   const completeCount = rows.filter((row) => row.newTotal >= row.line.qtyOrdered - 0.001).length;
 
   const submit = async () => {
     if (!can('purchases.receive')) return;
+    if (rows.some((row) => row.invalidPrice || row.invalidQuantity)) return;
     setConfirming(true);
     try {
       const ok = await actions.receivePurchase(
@@ -101,7 +189,7 @@ export function ReceivePurchasePage() {
         purchase.lines.map((line) => ({
           lineId: line.id,
           qtyReceived: rows.find((row) => row.line.id === line.id)?.newTotal ?? line.qtyReceived,
-          unitCostCents: parseMoney(priceTexts[line.id] ?? '') || line.expectedUnitCostCents,
+          unitCostCents: parseMoneyInput(priceTexts[line.id] ?? '') ?? line.expectedUnitCostCents,
         })),
       );
       if (ok) navigate(`/compras/${purchase.id}`);
@@ -132,7 +220,7 @@ export function ReceivePurchasePage() {
               type="button"
               className="btn btn-primary btn-touch"
               onClick={submit}
-              disabled={confirming || touched === 0}
+              disabled={confirming || touched === 0 || invalidPriceCount > 0 || invalidQuantityCount > 0}
             >
               <PackageCheck size={15} />
               Confirmar recebimento
@@ -153,7 +241,7 @@ export function ReceivePurchasePage() {
         </div>
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Total conferido</div>
-          <div className="mt-2 num text-[20px] text-cream">{money(finalTotal)}</div>
+          <div className="mt-2 num text-[20px] text-cream">{finalTotal === null ? '—' : money(finalTotal)}</div>
           <div className="mt-1.5 text-[10.5px] text-dim">
             {completeCount} de {rows.length} itens completos
           </div>
@@ -193,26 +281,28 @@ export function ReceivePurchasePage() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map(({ line, item, remaining, price, newTotal, priceDelta }) => {
+        {rows.map(({ line, item, remaining, delta, price, priceDelta, invalidPrice,
+          invalidQuantity, priorReceiptTotal }) => {
                   if (!item) return null;
+                  const unit = line.unit ?? item.unit;
                   return (
                     <tr key={line.id}>
                       <td>
                         <div className="text-[12.5px] text-cream">{item.name}</div>
                         <div className="mt-0.5 text-[10px] uppercase tracking-[0.06em] text-dim">
-                          {item.category} · {item.unit}
+                          {item.category} · compra em {unit} · estoque em {item.unit}
                         </div>
                       </td>
                       <td className="text-right num text-[11.5px] text-muted">
-                        {fmtQty(line.qtyOrdered, item.unit)}
+                        {fmtQty(line.qtyOrdered, unit)}
                       </td>
                       <td className="text-right num text-[11.5px] text-muted">
-                        {line.qtyReceived > 0 ? fmtQty(line.qtyReceived, item.unit) : '—'}
+                        {line.qtyReceived > 0 ? fmtQty(line.qtyReceived, unit) : '—'}
                       </td>
                       <td className="text-right">
                         <div className="relative ml-auto w-[112px]">
                           <input
-                            className="input num h-8 pr-8 text-right text-[12.5px]"
+                            className={`input num h-8 pr-8 text-right text-[12.5px] ${invalidQuantity ? 'border-danger' : ''}`}
                             inputMode="decimal"
                             value={qtyTexts[line.id] ?? ''}
                             onChange={(event) =>
@@ -220,17 +310,21 @@ export function ReceivePurchasePage() {
                             }
                             disabled={remaining <= 0}
                             aria-label={`Quantidade recebida de ${item.name}`}
+                            aria-invalid={invalidQuantity}
                           />
                           <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[9.5px] text-dim">
-                            {item.unit}
+                            {unit}
                           </span>
                         </div>
                         <div className="mt-1 text-[9.5px] text-dim">
-                          {remaining > 0 ? `pendente ${fmtQty(remaining, item.unit)}` : 'completo'}
+                          {remaining > 0 ? `pendente ${fmtQty(remaining, unit)}` : 'completo'}
                         </div>
+                        {invalidQuantity ? <div className="mt-1 text-[9.5px] text-danger">
+                          Informe até {fmtQty(remaining, unit)} e use no máximo 3 casas decimais
+                        </div> : null}
                       </td>
                       <td className="text-right num text-[11.5px] text-muted">
-                        {money(line.expectedUnitCostCents)}
+                        {money(line.expectedUnitCostCents)}/{unit}
                       </td>
                       <td className="text-right">
                         <div className="relative ml-auto w-[106px]">
@@ -238,16 +332,18 @@ export function ReceivePurchasePage() {
                             R$
                           </span>
                           <input
-                            className="input num h-8 pl-7 text-right text-[12px]"
+                            className={`input num h-8 pl-7 text-right text-[12px] ${invalidPrice ? 'border-copper' : ''}`}
                             inputMode="decimal"
                             value={priceTexts[line.id] ?? ''}
                             onChange={(event) =>
                               setPriceTexts((prev) => ({ ...prev, [line.id]: event.target.value }))
                             }
                             aria-label={`Preço real de ${item.name}`}
+                            aria-invalid={invalidPrice}
                           />
                         </div>
-                        {Math.abs(priceDelta) > 0.0001 ? (
+                        {invalidPrice ? <div className="mt-1 text-[9.5px] text-copper">Informe um preço válido</div> : null}
+                        {!invalidPrice && Math.abs(priceDelta) > 0.0001 ? (
                           <div
                             className={`mt-1 num text-[9.5px] ${
                               priceDelta > 0 ? 'text-copper' : 'text-ok'
@@ -259,7 +355,7 @@ export function ReceivePurchasePage() {
                         ) : null}
                       </td>
                       <td className="text-right num text-[12px] text-cream">
-                        {money(Math.round(newTotal * price))}
+                        {priorReceiptTotal === null ? '—' : money(priorReceiptTotal + Math.round(delta * price))}
                       </td>
                     </tr>
                   );
@@ -269,19 +365,22 @@ export function ReceivePurchasePage() {
           </div>
 
           <div className="divide-y divide-line md:hidden">
-            {rows.map(({ line, item, remaining, price, newTotal, priceDelta }) => {
+            {rows.map(({ line, item, remaining, delta, price, priceDelta, invalidPrice,
+              invalidQuantity, priorReceiptTotal }) => {
               if (!item) return null;
+              const unit = line.unit ?? item.unit;
               return (
                 <div key={line.id} className="px-4 py-3.5">
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <div className="text-[13px] text-cream">{item.name}</div>
                       <div className="mt-0.5 text-[10px] uppercase tracking-[0.06em] text-dim">
-                        solicitado {fmtQty(line.qtyOrdered, item.unit)} · recebido{' '}
-                        {fmtQty(line.qtyReceived, item.unit)}
+                        solicitado {fmtQty(line.qtyOrdered, unit)} {unit} · recebido{' '}
+                        {fmtQty(line.qtyReceived, unit)} {unit}
                       </div>
                     </div>
-                    <span className="num text-[12px] text-cream">{money(Math.round(newTotal * price))}</span>
+                    <span className="num text-[12px] text-cream">{priorReceiptTotal === null ? '—'
+                      : money(priorReceiptTotal + Math.round(delta * price))}</span>
                   </div>
                   <div className="mt-2.5 grid grid-cols-2 gap-2">
                     <div>
@@ -290,7 +389,7 @@ export function ReceivePurchasePage() {
                       </div>
                       <div className="relative">
                         <input
-                          className="input num h-11 pr-8 text-[16px]"
+                          className={`input num h-11 pr-8 text-[16px] ${invalidQuantity ? 'border-danger' : ''}`}
                           inputMode="decimal"
                           value={qtyTexts[line.id] ?? ''}
                           onChange={(event) =>
@@ -298,9 +397,10 @@ export function ReceivePurchasePage() {
                           }
                           disabled={remaining <= 0}
                           aria-label={`Quantidade recebida de ${item.name}`}
+                          aria-invalid={invalidQuantity}
                         />
                         <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-[10px] text-dim">
-                          {item.unit}
+                          {unit}
                         </span>
                       </div>
                     </div>
@@ -313,23 +413,26 @@ export function ReceivePurchasePage() {
                           R$
                         </span>
                         <input
-                          className="input num h-11 pl-8 text-[14px]"
+                          className={`input num h-11 pl-8 text-[14px] ${invalidPrice ? 'border-copper' : ''}`}
                           inputMode="decimal"
                           value={priceTexts[line.id] ?? ''}
                           onChange={(event) =>
                             setPriceTexts((prev) => ({ ...prev, [line.id]: event.target.value }))
                           }
                           aria-label={`Preço real de ${item.name}`}
+                          aria-invalid={invalidPrice}
                         />
                       </div>
                     </div>
                   </div>
                   <div className="mt-1.5 flex items-center justify-between text-[10px] text-dim">
                     <span>
-                      esperado {money(line.expectedUnitCostCents)} ·{' '}
-                      {remaining > 0 ? `pendente ${fmtQty(remaining, item.unit)}` : 'completo'}
+                      esperado {money(line.expectedUnitCostCents)}/{unit} ·{' '}
+                      {remaining > 0 ? `pendente ${fmtQty(remaining, unit)}` : 'completo'}
                     </span>
-                    {Math.abs(priceDelta) > 0.0001 ? (
+                    {invalidPrice ? <span className="text-copper">Informe um preço válido</span> : null}
+                    {invalidQuantity ? <span className="text-danger">Até {fmtQty(remaining, unit)} · máximo 3 casas decimais</span> : null}
+                    {!invalidPrice && Math.abs(priceDelta) > 0.0001 ? (
                       <span className={priceDelta > 0 ? 'text-copper' : 'text-ok'}>
                         {priceDelta > 0 ? '+' : ''}
                         {(priceDelta * 100).toFixed(1)}%
@@ -344,8 +447,12 @@ export function ReceivePurchasePage() {
           <div className="border-t border-line px-4 py-3">
             <div className="flex items-center justify-between">
               <span className="text-[11px] text-dim">Total conferido do pedido</span>
-              <span className="num text-[15px] text-cream">{money(finalTotal)}</span>
+              <span className="num text-[15px] text-cream">{finalTotal === null ? '—' : money(finalTotal)}</span>
             </div>
+            {receiptHistoryError ? <div className="mt-2 flex items-center justify-between gap-2 text-[10.5px] text-copper" role="alert"><span>Não foi possível consultar o histórico; o total consolidado fica indisponível.</span><button type="button" className="underline underline-offset-2" onClick={() => setReceiptHistoryRetry((value) => value + 1)}>Tentar novamente</button></div> : null}
+            {!receiptHistoryLoading && !receiptHistoryError && hasPriorReceipts && !receiptHistoryMatches ? <div className="mt-2 text-[10.5px] text-copper" role="alert">O histórico de preços não confere com as quantidades já recebidas; o total consolidado fica indisponível.</div> : null}
+            {invalidQuantityCount > 0 ? <div className="mt-2 text-[10.5px] text-danger">Corrija as quantidades destacadas: máximo do saldo pendente e 3 casas decimais.</div> : null}
+            {invalidPriceCount > 0 ? <div className="mt-2 text-[10.5px] text-copper">Informe o preço real para cada item recebido antes de confirmar.</div> : null}
           </div>
         </Panel>
 
@@ -409,7 +516,7 @@ export function ReceivePurchasePage() {
           type="button"
           className="btn btn-primary btn-touch w-full sm:w-auto"
           onClick={submit}
-          disabled={confirming || touched === 0 || !can('purchases.receive')}
+          disabled={confirming || touched === 0 || invalidPriceCount > 0 || invalidQuantityCount > 0 || !can('purchases.receive')}
         >
           <PackageCheck size={15} />
           Confirmar recebimento

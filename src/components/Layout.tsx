@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ClipboardList,
   LayoutDashboard,
+  LogOut,
   Menu,
   ShoppingCart,
   TrendingDown,
@@ -14,7 +15,7 @@ import {
 } from 'lucide-react';
 import { ROLE_LABEL, type Permission } from '../domain/permissions';
 import { monthLabel } from '../domain/format';
-import { NOW } from '../domain/clock';
+import { NOW_ISO } from '../domain/clock';
 import { belowMinItems } from '../domain/selectors';
 import { useApp, useCurrentUser } from '../state/AppStore';
 import { GlobalSearch } from './GlobalSearch';
@@ -145,16 +146,25 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
 
 function SidebarUser() {
   const user = useCurrentUser();
+  const { actions, mode } = useApp();
   return (
     <div className="border-t border-line px-4 py-3.5">
-      <div className="flex items-center gap-2.5">
-        <span className="grid h-7 w-7 shrink-0 place-items-center border border-line bg-raised font-mono text-[10px] text-copper">
-          {user.initials}
-        </span>
-        <div className="min-w-0">
-          <div className="truncate text-[11.5px] text-cream">{user.name}</div>
-          <div className="text-[10px] text-dim">{ROLE_LABEL[user.role]}</div>
+      <div className="flex items-center justify-between gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="grid h-7 w-7 shrink-0 place-items-center border border-line bg-raised font-mono text-[10px] text-copper">
+            {user.initials}
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-[11.5px] text-cream">{user.name}</div>
+            <div className="text-[10px] text-dim">{ROLE_LABEL[user.role]}</div>
+          </div>
         </div>
+        {mode === 'production' ? (
+          <button type="button" className="btn btn-quiet h-8 w-8 shrink-0 p-0"
+            onClick={() => void actions.logout()} aria-label="Encerrar sessão" title="Encerrar sessão">
+            <LogOut size={14} />
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -208,7 +218,7 @@ function TopBar({ onOpenMenu }: { onOpenMenu: () => void }) {
       </div>
       <div className="flex items-center gap-1.5 sm:gap-3">
         <span className="hidden font-mono text-[10px] uppercase tracking-[0.08em] text-dim xl:inline">
-          {monthLabel(NOW)} · {state.restaurant.name}
+          {monthLabel(new Date(state.asOf ?? NOW_ISO))} · {state.restaurant.name}
         </span>
         <GlobalSearch />
         {mode === 'demo' ? <RoleSwitcher /> : null}

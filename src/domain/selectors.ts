@@ -1,80 +1,162 @@
 import { DAY_MS, NOW, isThisMonth, isWithinDays } from './clock';
-import { convertQty } from './format';
+import { ingredientLineCostCents, roundCentsFromMilliUnits } from './format';
 import type {
   AppState,
   Cents,
   CountSession,
   InventoryItem,
   ItemStatus,
+  Loss,
   Movement,
   Purchase,
+  PurchaseLine,
   Recipe,
   RecommendedPurchase,
   Supplier,
   SupplierItem,
+  Unit,
 } from './types';
 
 export interface SupplierOffer extends SupplierItem {
   supplier: Supplier;
 }
 
+export function referenceDate(state: Pick<AppState, 'asOf'>): Date {
+  if (!state.asOf) return NOW;
+  const parsed = new Date(state.asOf);
+  return Number.isNaN(parsed.getTime()) ? NOW : parsed;
+}
+
 export function itemStatus(item: InventoryItem): ItemStatus {
   if (item.currentQty <= 0.0001) return 'empty';
   if (item.currentQty < item.minQty * 0.5) return 'critical';
   if (item.currentQty < item.minQty) return 'attention';
+  if (item.minQty > 0 && item.currentQty < item.minQty * 1.25) return 'near_minimum';
   return 'normal';
+}
+
+export function compareReplenishmentPriority(left: InventoryItem, right: InventoryItem): number {
+  const priority: Record<ItemStatus, number> = {
+    empty: 0, critical: 1, attention: 2, near_minimum: 3, normal: 4,
+  };
+  return priority[itemStatus(left)] - priority[itemStatus(right)]
+    || left.currentQty - right.currentQty
+    || left.name.localeCompare(right.name, 'pt-BR');
 }
 
 export function itemValueCents(item: InventoryItem): Cents {
   return Math.round(item.currentQty * item.costCents);
 }
 
+export function itemCostKnown(item: InventoryItem): boolean {
+  return item.costKnown ?? (Number.isFinite(item.costCents) && item.costCents > 0);
+}
+
+export function itemMovementValueCents(item: InventoryItem, quantity: number): Cents | null {
+  if (!itemCostKnown(item)) return null;
+  return roundCentsFromMilliUnits(quantity, item.costCents);
+}
+
+export function itemsWithoutCost(state: AppState): InventoryItem[] {
+  return state.items.filter((item) => !itemCostKnown(item));
+}
+
 export function stockValueCents(state: AppState): Cents {
-  return state.items.reduce((sum, item) => sum + itemValueCents(item), 0);
+  return state.items.reduce((sum, item) => sum + (itemCostKnown(item) ? itemValueCents(item) : 0), 0);
 }
 
 export function purchasesThisMonth(state: AppState): Purchase[] {
+  const reference = referenceDate(state);
   return state.purchases.filter(
-    (p) => p.status !== 'cancelled' && isThisMonth(p.createdAt),
+    (p) => p.status !== 'cancelled' && isThisMonth(p.createdAt, reference),
   );
 }
 
 export function purchasesMonthCents(state: AppState): Cents {
+  if (state.purchaseMonthInsight) return state.purchaseMonthInsight.expectedTotalCents;
   return purchasesThisMonth(state).reduce(
     (sum, p) => sum + purchaseTotalCents(p, 'expected'),
     0,
   );
 }
 
+export function purchasesMonthCount(state: AppState): number {
+  return state.purchaseMonthInsight?.orderCount ?? purchasesThisMonth(state).length;
+}
+
+export function receivedGoodsThisMonth(state: AppState): { valueCents: Cents; unpricedCount: number } {
+  const reversed = new Set(state.movements.flatMap((movement) =>
+    movement.reversalOf ? [movement.reversalOf] : []));
+  const receipts = state.movements.filter((movement) => movement.type === 'PURCHASE'
+    && movement.restaurantId === state.restaurant.id
+    && isThisMonth(movement.occurredAt, referenceDate(state))
+    && !reversed.has(movement.id));
+  return {
+    valueCents: receipts.reduce((sum, movement) => sum + (movement.unitCostCents == null
+      ? 0 : Math.round(movement.qty * movement.unitCostCents)), 0),
+    unpricedCount: receipts.filter((movement) => movement.unitCostCents == null).length,
+  };
+}
+
 export function lossesThisMonth(state: AppState) {
-  return state.losses.filter((l) => isThisMonth(l.at));
+  const reference = referenceDate(state);
+  return state.losses.filter((l) => isThisMonth(l.at, reference));
 }
 
 export function lossesMonthCents(state: AppState): Cents {
-  return lossesThisMonth(state).reduce((sum, l) => sum + l.valueCents, 0);
+  return lossesThisMonth(state).reduce((sum, l) => sum + (l.valueCents ?? 0), 0);
+}
+
+export type LossPurchaseComparison =
+  | { status: 'unavailable' | 'no-receipts' | 'unpriced-receipts' | 'unpriced-losses' | 'no-losses'; percentage: null }
+  | { status: 'percentage'; percentage: number };
+
+export function comparePricedLossesToReceivedGoods(lossValueCents: number | null,
+  lossCount: number | null, pricedLossCount: number | null,
+  receivedValueCents: number | null, unpricedReceiptCount: number | null): LossPurchaseComparison {
+  if (lossValueCents == null || lossCount == null || pricedLossCount == null
+      || receivedValueCents == null || unpricedReceiptCount == null) return { status: 'unavailable', percentage: null };
+  if (unpricedReceiptCount > 0) return { status: 'unpriced-receipts', percentage: null };
+  if (receivedValueCents <= 0) return { status: 'no-receipts', percentage: null };
+  if (pricedLossCount <= 0) {
+    return lossCount > 0 ? { status: 'unpriced-losses', percentage: null }
+      : { status: 'no-losses', percentage: null };
+  }
+  return { status: 'percentage', percentage: lossValueCents / receivedValueCents * 100 };
 }
 
 export function lossesWeekCents(state: AppState): Cents {
+  const reference = referenceDate(state);
   return state.losses
-    .filter((l) => isWithinDays(l.at, 7))
-    .reduce((sum, l) => sum + l.valueCents, 0);
+    .filter((l) => isWithinDays(l.at, 7, reference))
+    .reduce((sum, l) => sum + (l.valueCents ?? 0), 0);
+}
+
+export function lossesWithoutCost(losses: Loss[]): number {
+  return losses.filter((loss) => loss.valueCents == null).length;
 }
 
 export function belowMinItems(state: AppState): InventoryItem[] {
-  return state.items.filter((item) => itemStatus(item) !== 'normal');
+  return state.items.filter((item) => item.active !== false
+    && ['attention', 'critical', 'empty'].includes(itemStatus(item)));
 }
 
 export function approvedCountsThisMonth(state: AppState): CountSession[] {
+  const reference = referenceDate(state);
   return state.counts.filter(
-    (c) => c.status === 'approved' && c.approvedAt != null && isThisMonth(c.approvedAt),
+    (c) => c.status === 'approved' && c.approvedAt != null && isThisMonth(c.approvedAt, reference),
   );
 }
 
 export function divergenceCents(state: AppState): Cents {
   return approvedCountsThisMonth(state).reduce(
-    (sum, count) => sum + Math.abs(countFinancialCents(state, count)),
+    (sum, count) => sum + (countFinancialDivergenceCents(state, count) ?? 0),
     0,
   );
+}
+
+export function countsWithUnknownFinancialImpact(state: AppState): number {
+  return approvedCountsThisMonth(state).filter((count) => countFinancialDivergenceCents(state, count) == null).length;
 }
 
 export function purchaseTotalCents(
@@ -92,23 +174,56 @@ export function purchaseTotalCents(
   }, 0);
 }
 
-export function countFinancialCents(state: AppState, count: CountSession): Cents {
-  return count.lines.reduce((sum, line) => {
-    if (line.countedQty == null) return sum;
+export function countFinancialCents(state: AppState, count: CountSession): Cents | null {
+  if (count.status === 'approved' && count.financialImpactComplete !== undefined) {
+    return count.financialImpactComplete ? count.financialImpactCents ?? 0 : null;
+  }
+  let total = 0;
+  for (const line of count.lines) {
+    if (line.countedQty == null) continue;
     const item = state.items.find((i) => i.id === line.itemId);
-    if (!item) return sum;
-    return sum + Math.round((line.countedQty - line.expectedQty) * item.costCents);
-  }, 0);
+    if (!item) {
+      if (Math.round((line.countedQty - line.expectedQty) * 1000) !== 0) return null;
+      continue;
+    }
+    const delta = line.countedQty - line.expectedQty;
+    if (Math.round(delta * 1000) === 0) continue;
+    if (!itemCostKnown(item)) return null;
+    total += roundCentsFromMilliUnits(delta, item.costCents);
+  }
+  return total;
+}
+
+export function countFinancialDivergenceCents(state: AppState, count: CountSession): Cents | null {
+  if (count.status === 'approved' && count.financialImpactComplete !== undefined) {
+    if (!count.financialImpactComplete) return null;
+    if (count.financialDivergenceCents != null) return count.financialDivergenceCents;
+    const frozenLines = count.lines.filter((line) => line.financialImpactComplete === true);
+    return frozenLines.length
+      ? frozenLines.reduce((sum, line) => sum + Math.abs(line.financialImpactCents ?? 0), 0)
+      : Math.abs(count.financialImpactCents ?? 0);
+  }
+  let total = 0;
+  for (const line of count.lines) {
+    if (line.countedQty == null) continue;
+    const delta = line.countedQty - line.expectedQty;
+    if (Math.round(delta * 1000) === 0) continue;
+    const item = state.items.find((candidate) => candidate.id === line.itemId);
+    if (!item || !itemCostKnown(item)) return null;
+    total += Math.abs(roundCentsFromMilliUnits(delta, item.costCents));
+  }
+  return total;
 }
 
 export function countDivergences(count: CountSession): number {
   return count.lines.filter(
-    (line) => line.countedQty != null && Math.abs(line.countedQty - line.expectedQty) > 0.001,
+    (line) => line.countedQty != null
+      && Math.round((line.countedQty - line.expectedQty) * 1000) !== 0,
   ).length;
 }
 
 export function consumptionSince(state: AppState, itemId: string, days: number): number {
-  const from = NOW.getTime() - days * DAY_MS;
+  const from = referenceDate(state).getTime() - days * DAY_MS;
   return state.movements
     .filter(
       (m) =>
@@ -123,6 +238,12 @@ export function avgDailyConsumption(state: AppState, itemId: string, days = 30):
   return consumptionSince(state, itemId, days) / days;
 }
 
+export function consumptionCoverageLabel(quantity: number, daysRemaining: number): string {
+  if (quantity <= 0) return 'Sem estoque';
+  if (daysRemaining < 1) return 'Saldo cobre menos de 1 dia';
+  return `Saldo cobre cerca de ${Math.max(1, Math.round(daysRemaining))} dias`;
+}
+
 export interface PriceVariation {
   item: InventoryItem;
   firstCents: Cents;
@@ -132,9 +253,9 @@ export interface PriceVariation {
 }
 
 export function priceVariation(state: AppState, item: InventoryItem): PriceVariation | null {
-  const from = NOW.getTime() - 120 * DAY_MS;
+  const from = referenceDate(state).getTime() - 120 * DAY_MS;
   const points = state.pricePoints
-    .filter((p) => p.itemId === item.id && new Date(p.at).getTime() >= from)
+    .filter((p) => p.itemId === item.id && p.unitCostCents > 0 && new Date(p.at).getTime() >= from)
     .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
   if (points.length < 2) return null;
   const first = points[0].unitCostCents;
@@ -150,6 +271,7 @@ export function priceVariation(state: AppState, item: InventoryItem): PriceVaria
 
 export function risingCostItems(state: AppState): PriceVariation[] {
   return state.items
+    .filter((item) => item.active !== false)
     .map((item) => priceVariation(state, item))
     .filter((v): v is PriceVariation => v != null && v.variation >= 0.05)
     .sort((a, b) => b.variation - a.variation);
@@ -168,7 +290,16 @@ export function supplierOffers(state: AppState, itemId: string): SupplierOffer[]
       return supplier ? { ...si, supplier } : null;
     })
     .filter((x): x is SupplierOffer => x != null)
-    .sort((a, b) => a.lastPriceCents - b.lastPriceCents);
+    .sort((a, b) => {
+      const aKnown = a.lastPurchaseAt != null || a.lastPriceCents > 0;
+      const bKnown = b.lastPurchaseAt != null || b.lastPriceCents > 0;
+      if (aKnown !== bKnown) return aKnown ? -1 : 1;
+      return a.lastPriceCents - b.lastPriceCents;
+    });
+}
+
+export function supplierOfferHasPrice(offer: SupplierItem): boolean {
+  return offer.lastPurchaseAt != null || offer.lastPriceCents > 0;
 }
 
 export function supplierItemCount(state: AppState, supplierId: string): number {
@@ -177,33 +308,94 @@ export function supplierItemCount(state: AppState, supplierId: string): number {
   ).size;
 }
 
-export function supplierLastPurchase(state: AppState, supplierId: string): Purchase | null {
-  return (
-    state.purchases
-      .filter((p) => p.supplierId === supplierId && p.status === 'received')
-      .sort((a, b) => new Date(b.receivedAt ?? b.createdAt).getTime() - new Date(a.receivedAt ?? a.createdAt).getTime())[0] ??
-    null
-  );
+export interface PurchaseReceiptSummary {
+  purchase: Purchase;
+  line: PurchaseLine;
+  receivedAt: string;
+  unitCostCents: Cents | null;
+  unit: Unit;
+}
+
+function latestPurchaseReceipt(
+  state: AppState,
+  matches: (purchase: Purchase, line: PurchaseLine) => boolean,
+): PurchaseReceiptSummary | null {
+  const reversed = new Set(state.movements.flatMap((movement) =>
+    movement.reversalOf ? [movement.reversalOf] : []));
+  const receipts = state.movements
+    .filter((movement) => movement.type === 'PURCHASE'
+      && movement.restaurantId === state.restaurant.id
+      && !reversed.has(movement.id))
+    .sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime());
+
+  for (const movement of receipts) {
+    const purchase = state.purchases.find((entry) => entry.restaurantId === movement.restaurantId
+      && (entry.id === movement.origin || entry.code === movement.origin));
+    if (!purchase) continue;
+    const line = purchase.lines.find((entry) => entry.itemId === movement.itemId && entry.qtyReceived > 0);
+    if (!line || !matches(purchase, line)) continue;
+    return { purchase, line, receivedAt: movement.occurredAt,
+      unitCostCents: movement.unitCostCents, unit: movement.unit };
+  }
+  return null;
+}
+
+export function latestItemPurchaseReceipt(state: AppState, itemId: string): PurchaseReceiptSummary | null {
+  return latestPurchaseReceipt(state, (_purchase, line) => line.itemId === itemId);
+}
+
+export function supplierLastPurchase(state: AppState, supplierId: string): PurchaseReceiptSummary | null {
+  return latestPurchaseReceipt(state, (purchase) => purchase.supplierId === supplierId);
 }
 
 export function supplierRecentValue(state: AppState, supplierId: string): Cents {
-  return state.purchases
-    .filter(
-      (p) =>
-        p.supplierId === supplierId &&
-        p.status !== 'cancelled' &&
-        isWithinDays(p.createdAt, 90),
-    )
-    .reduce((sum, p) => sum + purchaseTotalCents(p), 0);
+  const insight = state.supplierPurchaseInsights?.[supplierId];
+  if (insight) return insight.recentReceivedValueCents;
+  const reference = referenceDate(state);
+  const reversed = new Set(state.movements.flatMap((movement) =>
+    movement.reversalOf ? [movement.reversalOf] : []));
+  return state.movements.reduce((sum, movement) => {
+    if (movement.type !== 'PURCHASE' || movement.restaurantId !== state.restaurant.id
+        || reversed.has(movement.id) || movement.unitCostCents == null
+        || !isWithinDays(movement.occurredAt, 90, reference)) return sum;
+    const purchase = state.purchases.find((entry) => entry.restaurantId === movement.restaurantId
+      && (entry.id === movement.origin || entry.code === movement.origin));
+    if (purchase?.supplierId !== supplierId) return sum;
+    return sum + roundCentsFromMilliUnits(movement.qty, movement.unitCostCents);
+  }, 0);
+}
+
+export function supplierReceiptInsight(state: AppState, supplierId: string) {
+  const insight = state.supplierPurchaseInsights?.[supplierId];
+  if (insight) return { receivedAt: insight.lastReceiptAt, purchaseCode: insight.lastReceiptCode };
+  const legacy = supplierLastPurchase(state, supplierId);
+  return legacy ? { receivedAt: legacy.receivedAt, purchaseCode: legacy.purchase.code } : null;
 }
 
 export function recommendedPurchases(state: AppState): RecommendedPurchase[] {
   const result: RecommendedPurchase[] = [];
 
   for (const item of state.items) {
+    if (item.active === false) continue;
     const avg = avgDailyConsumption(state, item.id);
-    if (avg <= 0) continue;
     const offer = primaryOffer(state, item);
+    if (avg <= 0) {
+      if (item.currentQty >= item.minQty) continue;
+      const recommendedQty = roundPurchaseQty(item.minQty - item.currentQty, item.unit);
+      result.push({
+        item,
+        basis: 'minimum',
+        avgDaily: 0,
+        daysRemaining: 0,
+        leadTimeDays: offer?.leadTimeDays ?? 0,
+        coverageDays: 0,
+        safetyQty: 0,
+        recommendedQty,
+        estimatedCostCents: itemCostKnown(item) ? Math.round(recommendedQty * item.costCents) : null,
+        formula: `Estoque atual ${fmtQty(item.currentQty)} ${item.unit} abaixo do mínimo ${fmtQty(item.minQty)} ${item.unit}`,
+      });
+      continue;
+    }
     const leadTimeDays = offer?.leadTimeDays ?? 2;
     const coverageDays = leadTimeDays + 4;
     const safetyQty = avg * 2;
@@ -215,18 +407,22 @@ export function recommendedPurchases(state: AppState): RecommendedPurchase[] {
     const recommendedQty = roundPurchaseQty(raw, item.unit);
     result.push({
       item,
+      basis: 'consumption',
       avgDaily: avg,
       daysRemaining,
       leadTimeDays,
       coverageDays,
       safetyQty: Math.round(safetyQty * 100) / 100,
       recommendedQty,
-      estimatedCostCents: Math.round(recommendedQty * item.costCents),
+      estimatedCostCents: itemCostKnown(item) ? Math.round(recommendedQty * item.costCents) : null,
       formula: `${fmtQty(avg)} ${item.unit}/dia × ${coverageDays} dias + ${fmtQty(safetyQty)} ${item.unit} − ${fmtQty(item.currentQty)} ${item.unit}`,
     });
   }
 
-  return result.sort((a, b) => a.daysRemaining - b.daysRemaining);
+  return result.sort((a, b) => {
+    if (a.basis !== b.basis) return a.basis === 'minimum' ? -1 : 1;
+    return a.daysRemaining - b.daysRemaining;
+  });
 }
 
 function fmtQty(value: number): string {
@@ -243,9 +439,28 @@ export function recipeCostCents(state: AppState, recipe: Recipe): Cents {
   return recipe.ingredients.reduce((sum, ingredient) => {
     const item = state.items.find((i) => i.id === ingredient.itemId);
     if (!item) return sum;
-    const qtyInItemUnit = convertQty(ingredient.qty, ingredient.unit, item.unit);
-    return sum + qtyInItemUnit * item.costCents;
+    return sum + ingredientLineCostCents(
+      ingredient.qty, ingredient.unit, item.unit, item.costCents, item.conversions,
+      ingredient.conversionToBase,
+    );
   }, 0);
+}
+
+export function recipeCostPerPortionCents(state: AppState, recipe: Recipe): Cents {
+  const portions = Math.max(1, Math.floor(recipe.yieldPortions || 1));
+  return Math.round(recipeCostCents(state, recipe) / portions);
+}
+
+export function recipeCostGaps(state: AppState, recipe: Recipe): string[] {
+  return recipe.ingredients.flatMap((ingredient) => {
+    const item = state.items.find((candidate) => candidate.id === ingredient.itemId);
+    if (!item) return [`Insumo indisponível (${ingredient.itemId})`];
+    return itemCostKnown(item) ? [] : [item.name];
+  });
+}
+
+export function recipeMarginCalculable(state: AppState, recipe: Recipe): boolean {
+  return recipe.salePriceCents > 0 && recipe.ingredients.length > 0 && recipeCostGaps(state, recipe).length === 0;
 }
 
 export function recipeMargin(recipe: Recipe, cost: Cents) {
@@ -276,6 +491,7 @@ export function recentMovements(state: AppState, limit = 6): Movement[] {
 export function topLossItem(state: AppState) {
   const totals = new Map<string, Cents>();
   for (const loss of lossesThisMonth(state)) {
+    if (loss.valueCents == null) continue;
     totals.set(loss.itemId, (totals.get(loss.itemId) ?? 0) + loss.valueCents);
   }
   const [itemId, valueCents] = [...totals.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
@@ -286,6 +502,7 @@ export function topLossItem(state: AppState) {
 export function topLossReason(state: AppState) {
   const totals = new Map<string, Cents>();
   for (const loss of lossesThisMonth(state)) {
+    if (loss.valueCents == null) continue;
     totals.set(loss.reason, (totals.get(loss.reason) ?? 0) + loss.valueCents);
   }
   const [reason, valueCents] = [...totals.entries()].sort((a, b) => b[1] - a[1])[0] ?? [];
@@ -304,12 +521,16 @@ export interface AttentionItem {
   actionLabel: string;
 }
 
+export function lossAlertSeverity(weekLossCents: Cents): 'high' | 'medium' {
+  return weekLossCents > 30_000 ? 'high' : 'medium';
+}
+
 export function attentionItems(state: AppState): AttentionItem[] {
   const alerts: AttentionItem[] = [];
   const rising = risingCostItems(state);
   const recs = recommendedPurchases(state);
 
-  const empty = state.items.filter((i) => itemStatus(i) === 'empty');
+  const empty = state.items.filter((i) => i.active !== false && itemStatus(i) === 'empty');
   for (const item of empty.slice(0, 2)) {
     const rec = recs.find((r) => r.item.id === item.id);
     alerts.push({
@@ -325,10 +546,24 @@ export function attentionItems(state: AppState): AttentionItem[] {
     });
   }
 
-  const risky = recs.filter((r) => r.daysRemaining <= r.coverageDays).slice(0, 3);
+  const risky = recs.filter((r) => r.basis === 'minimum' || r.daysRemaining <= r.coverageDays).slice(0, 3);
   for (const rec of risky) {
     const status = itemStatus(rec.item);
     if (status === 'empty') continue;
+    if (rec.basis === 'minimum') {
+      alerts.push({
+        id: `minimum-${rec.item.id}`,
+        severity: status === 'critical' ? 'high' : 'medium',
+        tag: 'Reposição',
+        title: `${rec.item.name} está abaixo do estoque mínimo.`,
+        detail: `Comprar ${fmtQty(rec.recommendedQty)} ${rec.item.unit} para recompor o mínimo de ${fmtQty(rec.item.minQty)} ${rec.item.unit}.`,
+        valueCents: rec.estimatedCostCents,
+        valueLabel: 'reposição estimada',
+        href: `/estoque/${rec.item.id}`,
+        actionLabel: 'Ver insumo',
+      });
+      continue;
+    }
     const days = Math.max(1, Math.round(rec.daysRemaining));
     alerts.push({
       id: `runout-${rec.item.id}`,
@@ -374,7 +609,7 @@ export function attentionItems(state: AppState): AttentionItem[] {
           Math.abs((a.countedQty ?? 0) - a.expectedQty),
       )[0];
     const item = biggest ? state.items.find((i) => i.id === biggest.itemId) : null;
-    const financial = countFinancialCents(state, lastCount);
+    const financial = countFinancialDivergenceCents(state, lastCount);
     if (biggest && item) {
       const diff = (biggest.countedQty ?? 0) - biggest.expectedQty;
       alerts.push({
@@ -382,9 +617,9 @@ export function attentionItems(state: AppState): AttentionItem[] {
         severity: 'high',
         tag: 'Divergência',
         title: `Contagem encontrou ${diff > 0 ? '+' : '−'}${fmtQty(Math.abs(diff))} ${item.unit} de ${item.name.toLowerCase()}.`,
-        detail: `${lastCount.code} aprovada em ${new Date(lastCount.approvedAt ?? '').toLocaleDateString('pt-BR')}. Diferença financeira total de ${moneyShort(Math.abs(financial))} na contagem.`,
-        valueCents: Math.abs(financial),
-        valueLabel: 'impacto na contagem',
+        detail: `${lastCount.code} aprovada em ${new Date(lastCount.approvedAt ?? '').toLocaleDateString('pt-BR')}. ${financial == null ? 'Impacto financeiro não calculável: há insumo sem custo cadastrado.' : `Divergência financeira bruta de ${moneyShort(financial)} na contagem.`}`,
+        valueCents: financial,
+        valueLabel: financial == null ? null : 'divergência bruta',
         href: `/contagem`,
         actionLabel: 'Revisar contagem',
       });
@@ -396,7 +631,7 @@ export function attentionItems(state: AppState): AttentionItem[] {
     const top = topLossReason(state);
     alerts.push({
       id: 'losses-week',
-      severity: weekLosses > 30000 ? 'medium' : 'high',
+      severity: lossAlertSeverity(weekLosses),
       tag: 'Perdas',
       title: `Você perdeu ${moneyShort(weekLosses)} em desperdícios nos últimos 7 dias.`,
       detail: top ? `${top.reason} é o motivo com maior impacto no mês.` : 'Registre o motivo de cada perda para identificar a origem.',

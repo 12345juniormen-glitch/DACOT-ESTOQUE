@@ -9,8 +9,11 @@ import {
   STATUS_LABEL,
 } from '../domain/types';
 import type { AppState } from '../domain/types';
+import type { Movement } from '../domain/types';
 import type { Permission } from '../domain/permissions';
 import { useApp } from '../state/AppStore';
+import { fetchApiGlobalSearch, type ApiGlobalSearchDocument } from '../lib/api';
+import type { CountSession, InventoryItem, Loss, Purchase, Supplier } from '../domain/types';
 
 type SearchGroup = 'Estoque' | 'Compras' | 'Fornecedores' | 'Fichas técnicas' | 'Contagens' | 'Perdas & movimentos';
 
@@ -21,7 +24,7 @@ interface SearchDocument {
   subtitle: string;
   href: string;
   searchable: string;
-  status?: 'attention' | 'critical' | 'empty';
+  status?: 'near_minimum' | 'attention' | 'critical' | 'empty';
 }
 
 const GROUP_ORDER: SearchGroup[] = [
@@ -47,10 +50,16 @@ function normalize(value: string): string {
     .trim();
 }
 
-function buildIndex(state: AppState, can: (permission: Permission) => boolean): SearchDocument[] {
+function buildIndex(state: AppState, can: (permission: Permission) => boolean,
+  movementSource: Movement[] = state.movements,
+  purchaseSource: Purchase[] = state.purchases,
+  supplierSource: Supplier[] = state.suppliers,
+  ingredientSource: InventoryItem[] = state.items,
+  lossSource: Loss[] = state.losses,
+  countSource: CountSession[] = state.counts): SearchDocument[] {
   const tenantId = state.restaurant.id;
-  const tenantSuppliers = state.suppliers.filter((supplier) => supplier.restaurantId === tenantId);
-  const tenantItems = state.items.filter((item) => item.restaurantId === tenantId);
+  const tenantSuppliers = supplierSource.filter((supplier) => supplier.restaurantId === tenantId);
+  const tenantItems = ingredientSource.filter((item) => item.restaurantId === tenantId);
   const tenantUsers = state.users.filter((user) => user.restaurantId === tenantId);
   const suppliersById = new Map(tenantSuppliers.map((supplier) => [supplier.id, supplier]));
   const itemsById = new Map(tenantItems.map((item) => [item.id, item]));
@@ -90,7 +99,7 @@ function buildIndex(state: AppState, can: (permission: Permission) => boolean): 
   }
 
   if (can('purchases.view')) {
-    for (const purchase of state.purchases.filter((entry) => entry.restaurantId === tenantId)) {
+    for (const purchase of purchaseSource.filter((entry) => entry.restaurantId === tenantId)) {
       const supplier = suppliersById.get(purchase.supplierId);
       const lineItems = purchase.lines.map((line) => itemsById.get(line.itemId)?.name ?? '').join(' ');
       documents.push({
@@ -148,7 +157,7 @@ function buildIndex(state: AppState, can: (permission: Permission) => boolean): 
   }
 
   if (can('count.view')) {
-    for (const count of state.counts.filter((entry) => entry.restaurantId === tenantId)) {
+    for (const count of countSource.filter((entry) => entry.restaurantId === tenantId)) {
       const itemNames = count.lines.map((line) => itemsById.get(line.itemId)?.name ?? '').join(' ');
       const creator = usersById.get(count.createdBy)?.name ?? '';
       documents.push({
@@ -163,7 +172,7 @@ function buildIndex(state: AppState, can: (permission: Permission) => boolean): 
   }
 
   if (can('losses.view')) {
-    for (const loss of state.losses.filter((entry) => entry.restaurantId === tenantId)) {
+    for (const loss of lossSource.filter((entry) => entry.restaurantId === tenantId)) {
       const item = itemsById.get(loss.itemId);
       const user = usersById.get(loss.userId);
       documents.push({
@@ -179,7 +188,7 @@ function buildIndex(state: AppState, can: (permission: Permission) => boolean): 
   }
 
   if (can('stock.view')) {
-    for (const movement of state.movements.filter((entry) => entry.restaurantId === tenantId)) {
+    for (const movement of movementSource.filter((entry) => entry.restaurantId === tenantId)) {
       const item = itemsById.get(movement.itemId);
       documents.push({
         id: `movement:${movement.id}`,
@@ -215,7 +224,7 @@ function score(document: SearchDocument, query: string, tokens: string[]): numbe
 }
 
 export function GlobalSearch() {
-  const { state, can } = useApp();
+  const { state, can, mode } = useApp();
   const navigate = useNavigate();
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
   const shortcutLabel = isMac ? '⌘K' : 'Ctrl K';
@@ -223,12 +232,58 @@ export function GlobalSearch() {
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
+  const [remoteDocuments, setRemoteDocuments] = useState<ApiGlobalSearchDocument[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const searchTenantRef = useRef(state.restaurant.id);
+  const searchGenerationRef = useRef(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
 
-  const index = useMemo(() => buildIndex(state, can), [state, can]);
   const searchableQuery = normalize(debouncedQuery);
+  useEffect(() => {
+    if (searchTenantRef.current === state.restaurant.id) return;
+    searchTenantRef.current = state.restaurant.id;
+    searchGenerationRef.current += 1;
+    setRemoteDocuments([]);
+    setSearchError(null);
+  }, [state.restaurant.id]);
+
+  useEffect(() => {
+    const generation = ++searchGenerationRef.current;
+    if (!open || mode !== 'production' || searchableQuery.length < 2) {
+      setRemoteDocuments([]);
+      setSearchLoading(false);
+      setSearchError(null);
+      return;
+    }
+    let current = true;
+    setRemoteDocuments([]);
+    setSearchLoading(true);
+    setSearchError(null);
+    void fetchApiGlobalSearch(debouncedQuery).then((documents) => {
+      if (current && generation === searchGenerationRef.current) setRemoteDocuments(documents);
+    }).catch((error: unknown) => {
+      if (current && generation === searchGenerationRef.current) {
+        setRemoteDocuments([]);
+        setSearchError(error instanceof Error ? error.message : 'Não foi possível buscar registros.');
+      }
+    }).finally(() => {
+      if (current && generation === searchGenerationRef.current) setSearchLoading(false);
+    });
+    return () => { current = false; };
+  }, [open, mode, searchableQuery, debouncedQuery, state.restaurant.id]);
+
+  const index = useMemo(() => {
+    if (mode !== 'production') return buildIndex(state, can);
+    const permissionByGroup: Record<SearchGroup, Permission> = {
+      Estoque: 'stock.view', Compras: 'purchases.view', Fornecedores: 'suppliers.view',
+      'Fichas técnicas': 'recipes.view', Contagens: 'count.view', 'Perdas & movimentos': 'losses.view',
+    };
+    return remoteDocuments.filter((document) => can(permissionByGroup[document.group]))
+      .map((document) => ({ ...document, searchable: normalize(document.searchable) }));
+  }, [state, can, mode, remoteDocuments]);
   const tokens = searchableQuery.split(/\s+/).filter(Boolean);
   const matches = useMemo(() => {
     if (!searchableQuery) return [];
@@ -388,12 +443,21 @@ export function GlobalSearch() {
             </div>
 
             <div id="global-search-results" role="listbox" className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 py-2 sm:px-3">
+              {query.trim() && searchLoading && visibleResults.length > 0 ? (
+                <div role="status" aria-live="polite" className="px-3 py-2 text-[11px] text-dim">
+                  Consultando resultados remotos…
+                </div>
+              ) : null}
               {!query.trim() ? (
                 <div className="px-3 py-6 text-[12px] text-dim sm:py-8">
                   Busque insumos, compras, fornecedores, contagens, perdas e fichas técnicas.
                 </div>
               ) : normalize(query) !== searchableQuery ? (
                 <div className="px-3 py-6 text-[12px] text-dim">Buscando...</div>
+              ) : visibleResults.length === 0 && searchLoading ? (
+                <div className="px-3 py-6 text-[12px] text-dim sm:py-8">Buscando resultados…</div>
+              ) : visibleResults.length === 0 && searchError ? (
+                <div className="px-3 py-6 text-[12px] text-danger sm:py-8">{searchError}</div>
               ) : visibleResults.length === 0 ? (
                 <div className="px-3 py-6 text-[12px] text-dim sm:py-8">
                   Nenhum resultado para “{query.trim()}”.
@@ -424,7 +488,7 @@ export function GlobalSearch() {
                               <span className="mt-0.5 block truncate text-[10.5px] text-dim">{result.subtitle}</span>
                             </span>
                             {result.status ? (
-                              <span className={`shrink-0 text-[10px] ${result.status === 'attention' ? 'text-warn' : 'text-danger'}`}>
+                              <span className={`shrink-0 text-[10px] ${result.status === 'near_minimum' ? 'text-copper' : result.status === 'attention' ? 'text-warn' : 'text-danger'}`}>
                                 ● {STATUS_LABEL[result.status]}
                               </span>
                             ) : null}

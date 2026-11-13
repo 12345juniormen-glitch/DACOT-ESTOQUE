@@ -1,17 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ArrowRight, Plus, Truck } from 'lucide-react';
+import { ArrowRight, Plus, Search, Truck } from 'lucide-react';
 import { useApp } from '../state/AppStore';
 import {
   supplierItemCount,
-  supplierLastPurchase,
+  supplierReceiptInsight,
   supplierRecentValue,
 } from '../domain/selectors';
 import { money, parseMoney, parseQty, shortDate } from '../domain/format';
 import { Drawer, EmptyState, Field, PageHeader, Panel } from '../components/ui';
+import { fetchApiSupplierPage } from '../lib/api';
 
 export function SuppliersPage() {
-  const { state, actions, can } = useApp();
+  const { state, actions, can, mode, notify } = useApp();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
@@ -21,6 +22,32 @@ export function SuppliersPage() {
   const [leadTime, setLeadTime] = useState('2');
   const [minOrder, setMinOrder] = useState('');
   const [notes, setNotes] = useState('');
+  const [search, setSearch] = useState('');
+  const [retryVersion, setRetryVersion] = useState(0);
+  const [serverSuppliers, setServerSuppliers] = useState<{
+    query: string; suppliers: typeof state.suppliers; loading: boolean; hasMore: boolean; error: string | null;
+  }>({ query: '', suppliers: [], loading: false, hasMore: false, error: null });
+
+  useEffect(() => {
+    if (mode !== 'production') return;
+    let current = true;
+    const normalizedQuery = search.trim();
+    setServerSuppliers({ query: normalizedQuery, suppliers: [], loading: true, hasMore: false, error: null });
+    void fetchApiSupplierPage(normalizedQuery, 0).then((page) => {
+      if (current) setServerSuppliers({ query: normalizedQuery, suppliers: page.suppliers,
+        loading: false, hasMore: page.hasMore, error: null });
+    }).catch((error: unknown) => {
+      if (current) setServerSuppliers({ query: normalizedQuery, suppliers: [], loading: false,
+        hasMore: false, error: error instanceof Error ? error.message : 'Não foi possível carregar fornecedores.' });
+    });
+    return () => { current = false; };
+  }, [mode, search, state.suppliers.length, retryVersion]);
+
+  const suppliers = mode === 'production'
+    ? serverSuppliers.query === search.trim() ? serverSuppliers.suppliers : []
+    : state.suppliers;
+  const supplierLoading = mode === 'production' && serverSuppliers.query !== search.trim()
+    ? true : serverSuppliers.loading;
 
   const submit = async () => {
     const id = await actions.createSupplier({
@@ -63,15 +90,26 @@ export function SuppliersPage() {
 
       <Panel
         title="Cadastro de fornecedores"
-        subtitle={`${state.suppliers.length} fornecedores · abra um cadastro para contatos, prazos e histórico`}
+        subtitle={`${suppliers.length}${serverSuppliers.hasMore && mode === 'production' ? '+' : ''} fornecedores exibidos · abra um cadastro para contatos, prazos e histórico`}
         flush
         bodyClassName=""
       >
-        {state.suppliers.length === 0 ? (
+        <div className="border-b border-line p-3">
+          <label className="relative block">
+            <Search size={14} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-dim" />
+            <input className="input pl-9" value={search} onChange={(event) => setSearch(event.target.value)}
+              placeholder="Buscar pelo início do nome" aria-label="Buscar fornecedores pelo nome" />
+          </label>
+        </div>
+        {supplierLoading && suppliers.length === 0 ? <div className="p-5 text-sm text-dim">Carregando fornecedores…</div> : null}
+        {serverSuppliers.error && mode === 'production' && serverSuppliers.query === search.trim() ? <div className="p-5 text-sm text-copper">
+          {serverSuppliers.error}<button type="button" className="ml-2 underline" onClick={() => setRetryVersion((version) => version + 1)}>Tentar novamente</button>
+        </div> : null}
+        {!supplierLoading && !serverSuppliers.error && suppliers.length === 0 ? (
           <EmptyState
             icon={<Truck size={18} />}
-            title="Ainda não há fornecedores cadastrados"
-            description="Cadastre seu primeiro fornecedor para começar a registrar preços, prazos e compras."
+            title={search.trim() ? 'Nenhum fornecedor encontrado' : 'Ainda não há fornecedores cadastrados'}
+            description={search.trim() ? 'Tente outro início de nome.' : 'Cadastre seu primeiro fornecedor para começar a registrar preços, prazos e compras.'}
             action={
               can('suppliers.manage') ? (
                 <button type="button" className="btn btn-primary" onClick={() => setOpen(true)}>
@@ -80,7 +118,7 @@ export function SuppliersPage() {
               ) : null
             }
           />
-        ) : (
+        ) : suppliers.length > 0 ? (
           <>
             <div className="scroll-x hidden md:block">
               <table className="table min-w-[520px]">
@@ -93,7 +131,7 @@ export function SuppliersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {state.suppliers.map((supplier) => {
+                  {suppliers.map((supplier) => {
                     return (
                       <tr key={supplier.id} className="row-link">
                         <td>
@@ -116,8 +154,8 @@ export function SuppliersPage() {
             </div>
 
             <div className="divide-y divide-line md:hidden">
-              {state.suppliers.map((supplier) => {
-                const last = supplierLastPurchase(state, supplier.id);
+              {suppliers.map((supplier) => {
+                const receipt = supplierReceiptInsight(state, supplier.id);
                 return (
                   <Link
                     key={supplier.id}
@@ -131,13 +169,28 @@ export function SuppliersPage() {
                       </div>
                       <ArrowRight size={13} className="mt-0.5 shrink-0 text-dim" />
                     </div>
-                    <div className="mt-2 flex items-center justify-between text-[10.5px] text-dim"><span>{last?.receivedAt ? `Última compra ${shortDate(last.receivedAt)}` : 'Sem compra recebida'}</span><span className="num text-muted">{money(supplierRecentValue(state, supplier.id))} em 90 dias</span></div>
+                    <div className="mt-2 flex items-center justify-between text-[10.5px] text-dim"><span>{receipt?.receivedAt ? `Última compra ${shortDate(receipt.receivedAt)}` : 'Sem compra recebida'}</span><span className="num text-muted">{money(supplierRecentValue(state, supplier.id))} em 90 dias</span></div>
                   </Link>
                 );
               })}
             </div>
+            {mode === 'production' && serverSuppliers.hasMore ? <div className="border-t border-line p-3 text-center">
+              <button type="button" className="btn btn-ghost" disabled={supplierLoading} onClick={() => {
+                setServerSuppliers((previous) => ({ ...previous, loading: true, error: null }));
+                void fetchApiSupplierPage(search.trim(), suppliers.length).then((page) => {
+                  setServerSuppliers((previous) => previous.query === search.trim() ? ({
+                    ...previous, suppliers: [...previous.suppliers, ...page.suppliers],
+                    loading: false, hasMore: page.hasMore, error: null,
+                  }) : previous);
+                }).catch((error: unknown) => {
+                  const message = error instanceof Error ? error.message : 'Não foi possível carregar mais fornecedores.';
+                  setServerSuppliers((previous) => ({ ...previous, loading: false, error: message }));
+                  notify(message, 'error');
+                });
+              }}>{supplierLoading ? 'Carregando…' : 'Carregar mais fornecedores'}</button>
+            </div> : null}
           </>
-        )}
+        ) : null}
       </Panel>
 
       <p className="mt-3 text-[10.5px] leading-relaxed text-dim">

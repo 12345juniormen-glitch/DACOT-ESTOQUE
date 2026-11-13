@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   ArrowRight,
@@ -8,17 +8,23 @@ import {
   MoveDownRight,
   MoveUpRight,
   Plus,
+  RotateCcw,
   Truck,
 } from 'lucide-react';
 import { useApp } from '../state/AppStore';
+import { fetchApiIngredient, fetchApiIngredientMovementPage, fetchApiPurchase,
+  fetchApiIngredientPriceHistory, fetchApiRecipesUsingIngredient, fetchApiSupplierPage } from '../lib/api';
 import {
-  itemMovements,
   itemStatus,
+  itemCostKnown,
+  itemMovementValueCents,
   itemValueCents,
+  latestItemPurchaseReceipt,
   priceVariation,
   primaryOffer,
   recipesUsingItem,
   recommendedPurchases,
+  supplierOfferHasPrice,
   supplierOffers,
 } from '../domain/selectors';
 import {
@@ -28,7 +34,8 @@ import {
   shortDate,
   time,
 } from '../domain/format';
-import { MOVEMENT_LABEL } from '../domain/types';
+import { CATEGORIES, MOVEMENT_LABEL, type Movement, type PricePoint, type Unit } from '../domain/types';
+import { moneyInput, parseStockQty, parseOptionalNonNegativeMoney, parseQty } from '../domain/format';
 import {
   BackLink,
   Dialog,
@@ -42,27 +49,194 @@ import {
   ToneNote,
 } from '../components/ui';
 import { PriceChart } from '../components/charts';
+import { ConversionEditor, conversionDrafts, parseConversionDrafts, type ConversionDraft } from '../components/ConversionEditor';
 
 export function ItemDetailPage() {
   const { id } = useParams();
-  const { state, actions, can } = useApp();
+  const { state, actions, can, mode, ready, auditHasMore, auditLoading, notify } = useApp();
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
   const item = state.items.find((i) => i.id === id);
   const [movementOpen, setMovementOpen] = useState(false);
   const [kind, setKind] = useState<'in' | 'out' | 'adjust'>('in');
   const [quantity, setQuantity] = useState('');
   const [reason, setReason] = useState('');
   const [showAll, setShowAll] = useState(false);
+  const [showAllAudit, setShowAllAudit] = useState(false);
   const [confirmAdjust, setConfirmAdjust] = useState(false);
+  const [reversalTarget, setReversalTarget] = useState<string | null>(null);
+  const [reversalReason, setReversalReason] = useState('');
+  const [editOpen, setEditOpen] = useState(false);
+  const [editName, setEditName] = useState('');
+  const [editCategory, setEditCategory] = useState<(typeof CATEGORIES)[number]>('Outros');
+  const [editMinQty, setEditMinQty] = useState('');
+  const [editCost, setEditCost] = useState('');
+  const [editSupplier, setEditSupplier] = useState('');
+  const [editInternalCode, setEditInternalCode] = useState('');
+  const [editBarcode, setEditBarcode] = useState('');
+  const [editNotes, setEditNotes] = useState('');
+  const [editActive, setEditActive] = useState(true);
+  const [editConversions, setEditConversions] = useState<ConversionDraft[]>([]);
+  const [movementPage, setMovementPage] = useState<{ itemId: string | null; movements: Movement[];
+    hasMore: boolean; loading: boolean; error: string | null }>(
+      { itemId: null, movements: [], hasMore: false, loading: false, error: null });
+  const [movementRetry, setMovementRetry] = useState(0);
+  const [priceHistory, setPriceHistory] = useState<{ itemId: string; restaurantId: string;
+    points: PricePoint[]; summary: { first_cost_cents: number; last_cost_cents: number; count: number } | null;
+    loading: boolean; error: string | null } | null>(null);
+  const [supplierOptions, setSupplierOptions] = useState(state.suppliers);
+  const [supplierOptionsHasMore, setSupplierOptionsHasMore] = useState(false);
+  const [supplierOptionsLoadingMore, setSupplierOptionsLoadingMore] = useState(false);
+  const [ingredientLoadError, setIngredientLoadError] = useState<string | null>(null);
+  useEffect(() => {
+    if (mode !== 'production' || !ready || !id || item) {
+      setIngredientLoadError(null);
+      return;
+    }
+    let current = true;
+    setIngredientLoadError(null);
+    void fetchApiIngredient(id).then((ingredient) => {
+      if (current) actions.cacheIngredients([ingredient]);
+    }).catch((error: unknown) => {
+      if (!current) return;
+      setIngredientLoadError(error instanceof Error ? error.message : 'Não foi possível carregar o insumo.');
+    });
+    return () => { current = false; };
+  }, [actions, id, item, mode, ready, state.restaurant.id]);
+  useEffect(() => {
+    if (mode !== 'production' || !item?.id) return;
+    let current = true;
+    void fetchApiRecipesUsingIngredient(item.id).then((recipes) => {
+      if (current) actionsRef.current.cacheRecipes(recipes);
+    }).catch((error: unknown) => {
+      if (current) notify(error instanceof Error
+        ? `Não foi possível carregar as fichas deste insumo (${error.message}).`
+        : 'Não foi possível carregar as fichas deste insumo.', 'error');
+    });
+    return () => { current = false; };
+  }, [item?.id, mode, state.restaurant.id, notify]);
+  useEffect(() => {
+    if (!editOpen || mode !== 'production') return;
+    let active = true;
+    void fetchApiSupplierPage('', 0, 50, false).then((page) => {
+      if (active) {
+        setSupplierOptions(page.suppliers);
+        setSupplierOptionsHasMore(page.hasMore);
+      }
+    }).catch((error: unknown) => {
+      if (active) notify(error instanceof Error ? error.message : 'Não foi possível carregar fornecedores.', 'error');
+    });
+    return () => { active = false; };
+  }, [editOpen, mode, notify]);
 
+  const loadMoreSuppliers = async () => {
+    if (supplierOptionsLoadingMore || !supplierOptionsHasMore) return;
+    setSupplierOptionsLoadingMore(true);
+    try {
+      const page = await fetchApiSupplierPage('', supplierOptions.length, 50, false);
+      setSupplierOptions((previous) => [...previous,
+        ...page.suppliers.filter((supplier) => !previous.some((entry) => entry.id === supplier.id))]);
+      setSupplierOptionsHasMore(page.hasMore);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Não foi possível carregar mais fornecedores.', 'error');
+    } finally {
+      setSupplierOptionsLoadingMore(false);
+    }
+  };
+  useEffect(() => {
+    if (mode !== 'production' || !item?.id) {
+      setMovementPage({ itemId: null, movements: [], hasMore: false, loading: false, error: null });
+      return;
+    }
+    let current = true;
+    setShowAll(false);
+    const ingredientId = item.id;
+    setMovementPage({ itemId: ingredientId, movements: [], hasMore: false, loading: true, error: null });
+    void fetchApiIngredientMovementPage(ingredientId, 0).then((page) => {
+      if (current) setMovementPage({ itemId: ingredientId, movements: page.movements,
+        hasMore: page.hasMore, loading: false, error: null });
+    }).catch((error: unknown) => {
+      if (!current) return;
+      const detail = error instanceof Error ? error.message : 'falha de conexão';
+      setMovementPage({ itemId: ingredientId, movements: [], hasMore: false, loading: false, error: detail });
+    });
+    return () => { current = false; };
+  }, [item?.id, mode, movementRetry]);
+  useEffect(() => {
+    if (mode !== 'production' || !ready || !item?.id || !state.restaurant.id) {
+      setPriceHistory(null);
+      return;
+    }
+    let current = true;
+    const itemId = item.id;
+    const restaurantId = state.restaurant.id;
+    setPriceHistory({ itemId, restaurantId, points: [], summary: null, loading: true, error: null });
+    void fetchApiIngredientPriceHistory(itemId).then((result) => {
+      if (!current) return;
+      if (result.points.some((point) => point.itemId !== itemId || point.restaurantId !== restaurantId)) {
+        throw new Error('A API retornou preços fora do insumo ou restaurante ativo.');
+      }
+      setPriceHistory({ itemId, restaurantId, points: result.points, summary: result.summary,
+        loading: false, error: null });
+    }).catch((error: unknown) => {
+      if (!current) return;
+      setPriceHistory({ itemId, restaurantId, points: [], summary: null, loading: false,
+        error: error instanceof Error ? error.message : 'Não foi possível carregar o histórico de preços.' });
+    });
+    return () => { current = false; };
+  }, [item?.id, mode, ready, state.restaurant.id]);
+
+  const loadMoreMovements = async () => {
+    if (!item || movementPage.itemId !== item.id || movementPage.loading || !movementPage.hasMore) return;
+    const ingredientId = item.id;
+    setMovementPage((previous) => ({ ...previous, loading: true, error: null }));
+    try {
+      const page = await fetchApiIngredientMovementPage(ingredientId, movementPage.movements.length);
+      setMovementPage((previous) => previous.itemId !== ingredientId ? previous : ({
+        ...previous,
+        movements: [...previous.movements,
+          ...page.movements.filter((movement) => !previous.movements.some((entry) => entry.id === movement.id))],
+        hasMore: page.hasMore, loading: false, error: null,
+      }));
+    } catch (error) {
+      setMovementPage((previous) => previous.itemId !== ingredientId ? previous : ({
+        ...previous, loading: false,
+        error: error instanceof Error ? error.message : 'Não foi possível carregar mais movimentações.',
+      }));
+    }
+  };
+  useEffect(() => {
+    if (mode !== 'production' || !item?.id) return;
+    const latestReceipt = state.movements.filter((movement) => movement.type === 'PURCHASE'
+      && movement.itemId === item.id && movement.restaurantId === state.restaurant.id
+      && movement.origin && !state.purchases.some((purchase) => purchase.id === movement.origin))
+      .sort((a, b) => new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime())[0];
+    if (!latestReceipt) return;
+    let current = true;
+    void fetchApiPurchase(latestReceipt.origin).then((purchase) => {
+      if (current) actions.cachePurchase(purchase);
+    }).catch(() => { /* The movement remains available even if the historical order was removed. */ });
+    return () => { current = false; };
+  }, [mode, item?.id, state.movements, state.purchases, state.restaurant.id, actions]);
+  const points = useMemo(() => item
+    ? (mode === 'production'
+      ? priceHistory?.itemId === item.id && priceHistory.restaurantId === state.restaurant.id
+        ? [...priceHistory.points]
+        : []
+      : state.pricePoints.filter((p) => p.itemId === item.id && p.unitCostCents > 0))
+      .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+    : [], [mode, priceHistory, state.pricePoints, state.restaurant.id, item?.id]);
   if (!item) {
+    const loading = mode === 'production' && ready && !ingredientLoadError;
     return (
       <div>
         <BackLink to="/estoque">Estoque</BackLink>
         <Panel>
           <EmptyState
             icon={<Info size={18} />}
-            title="Insumo não encontrado"
-            description="O item pode ter sido removido ou o endereço está incorreto."
+            title={loading ? 'Carregando insumo' : ingredientLoadError ? 'Não foi possível carregar o insumo' : 'Insumo não encontrado'}
+            description={loading ? 'Consultando os dados persistidos deste insumo.'
+              : ingredientLoadError ?? 'O item pode ter sido removido ou o endereço está incorreto.'}
             action={
               <Link to="/estoque" className="btn btn-ghost">
                 Voltar ao estoque
@@ -75,37 +249,45 @@ export function ItemDetailPage() {
   }
 
   const status = itemStatus(item);
-  const movements = itemMovements(state, item.id);
+  const movementById = new Map((movementPage.itemId === item.id ? movementPage.movements : [])
+    .filter((movement) => movement.itemId === item.id)
+    .map((movement) => [movement.id, movement]));
+  state.movements.filter((movement) => movement.itemId === item.id)
+    .forEach((movement) => movementById.set(movement.id, movement));
+  const movements = [...movementById.values()]
+    .sort((left, right) => new Date(right.occurredAt).getTime() - new Date(left.occurredAt).getTime());
   const offers = supplierOffers(state, item.id);
+  const pricedOffers = offers.filter(supplierOfferHasPrice);
   const primary = primaryOffer(state, item);
-  const variation = priceVariation(state, item);
+  const currentPriceHistory = priceHistory?.itemId === item.id
+    && priceHistory.restaurantId === state.restaurant.id ? priceHistory : null;
+  const variation = mode === 'production'
+    ? currentPriceHistory?.summary && currentPriceHistory.summary.count >= 2
+      ? { item, firstCents: currentPriceHistory.summary.first_cost_cents,
+        lastCents: currentPriceHistory.summary.last_cost_cents,
+        variation: currentPriceHistory.summary.first_cost_cents === 0 ? 0
+          : (currentPriceHistory.summary.last_cost_cents - currentPriceHistory.summary.first_cost_cents)
+            / currentPriceHistory.summary.first_cost_cents,
+        points: currentPriceHistory.summary.count }
+      : null
+    : priceVariation(state, item);
   const usedIn = recipesUsingItem(state, item.id);
   const recommendation = recommendedPurchases(state).find((r) => r.item.id === item.id);
-  const points = useMemo(
-    () =>
-      state.pricePoints
-        .filter((p) => p.itemId === item.id)
-        .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime()),
-    [state.pricePoints, item.id],
-  );
   const latestPoints = points.slice(-6);
-  const lastPurchase = state.purchases
-    .filter(
-      (p) =>
-        p.status !== 'cancelled' &&
-        p.receivedAt &&
-        p.lines.some((l) => l.itemId === item.id && l.qtyReceived > 0),
-    )
-    .sort((a, b) => new Date(b.receivedAt ?? '').getTime() - new Date(a.receivedAt ?? '').getTime())[0];
-  const lastPurchaseLine = lastPurchase?.lines.find((l) => l.itemId === item.id);
-  const itemAudit = state.audit
-    .filter((entry) => entry.entityLabel.includes(item.name))
-    .slice(0, 5);
+  const lastPurchaseReceipt = latestItemPurchaseReceipt(state, item.id);
+  const itemAuditEntries = state.audit.filter((entry) => entry.entityLabel.includes(item.name));
+  const itemAudit = showAllAudit ? itemAuditEntries : itemAuditEntries.slice(0, 5);
   const visibleMovements = showAll ? movements : movements.slice(0, 12);
-  const cheapest = offers[0];
-  const mostExpensive = offers[offers.length - 1];
+  const cheapest = pricedOffers[0];
+  const mostExpensive = pricedOffers[pricedOffers.length - 1];
 
-  const typedQty = Math.round((Number(quantity.replace(',', '.')) || 0) * 1000) / 1000;
+  const parsedMovementQty = parseStockQty(quantity);
+  const typedQty = parsedMovementQty ?? 0;
+  const movementEstimate = typedQty > 0 ? itemMovementValueCents(item, typedQty) : null;
+  const validMovementDraft = parsedMovementQty != null && (parsedMovementQty === 0 || typedQty > 0)
+    && reason.trim().length > 0 && (kind === 'adjust'
+    ? typedQty >= 0 && Math.abs(typedQty - item.currentQty) >= 0.0001
+    : typedQty > 0 && (kind !== 'out' || typedQty <= item.currentQty + 0.0001));
   const adjustPreview =
     kind === 'adjust'
       ? typedQty
@@ -129,6 +311,44 @@ export function ItemDetailPage() {
     }
   };
 
+  const openEdit = () => {
+    setEditName(item.name);
+    setEditCategory(item.category);
+    setEditMinQty(String(item.minQty).replace('.', ','));
+    setEditCost(itemCostKnown(item) ? moneyInput(item.costCents) : '');
+    setEditSupplier(item.primarySupplierId ?? '');
+    setEditInternalCode(item.internalCode ?? '');
+    setEditBarcode(item.barcode ?? '');
+    setEditNotes(item.notes ?? '');
+    setEditActive(item.active !== false);
+    setEditConversions(conversionDrafts(item.conversions));
+    setEditOpen(true);
+  };
+
+  const saveEdit = async () => {
+    const conversionMap = parseConversionDrafts(editConversions);
+    if (!conversionMap) return;
+    const parsedCost = parseOptionalNonNegativeMoney(editCost);
+    if (!parsedCost) {
+      notify('Informe um custo válido, igual ou maior que zero.', 'error');
+      return;
+    }
+    const ok = await actions.updateItem(item.id, {
+      name: editName.trim(),
+      category: editCategory,
+      minQty: parseQty(editMinQty),
+      costCents: parsedCost.cents,
+      costKnown: parsedCost.known,
+      supplierId: editSupplier || null,
+      internalCode: editInternalCode.trim() || null,
+      barcode: editBarcode.trim() || null,
+      notes: editNotes.trim(),
+      active: editActive,
+      conversions: conversionMap,
+    });
+    if (ok) setEditOpen(false);
+  };
+
   return (
     <div>
       <BackLink to="/estoque">Estoque</BackLink>
@@ -147,6 +367,11 @@ export function ItemDetailPage() {
         }
         actions={
           <>
+            {can('stock.create') ? (
+              <button type="button" className="btn btn-ghost" onClick={openEdit}>
+                Editar cadastro
+              </button>
+            ) : null}
             {can('losses.manage') ? (
               <Link to={`/perdas?item=${item.id}`} className="btn btn-ghost">
                 Registrar perda
@@ -169,9 +394,11 @@ export function ItemDetailPage() {
             {fmtQty(item.currentQty, item.unit)}
           </div>
           <div className="mt-2 text-[10.5px] text-muted">
-            {recommendation
-              ? `acaba em ${Math.max(1, Math.round(recommendation.daysRemaining))} dias`
-              : 'sem risco de ruptura'}
+            {recommendation?.basis === 'minimum'
+              ? 'abaixo do mínimo'
+              : recommendation
+                ? `acaba em ${Math.max(1, Math.round(recommendation.daysRemaining))} dias`
+                : 'sem risco de ruptura'}
           </div>
         </div>
         <div className="bg-panel px-4 py-4">
@@ -188,21 +415,23 @@ export function ItemDetailPage() {
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Custo atual</div>
           <div className="mt-2 num text-[21px] leading-none text-cream">
-            {money(item.costCents)}
-            <span className="ml-1 text-[11px] text-dim">/{item.unit}</span>
+            {itemCostKnown(item) ? `${money(item.costCents)}/${item.unit}` : 'Não cadastrado'}
           </div>
           <div className="mt-2 text-[10.5px] text-muted">
             {variation
               ? `${variation.variation >= 0 ? '+' : ''}${(variation.variation * 100).toFixed(1)}% em 120 dias`
-              : 'sem histórico suficiente'}
+              : mode === 'production' && priceHistory?.itemId === item.id
+                ? priceHistory.loading ? 'carregando histórico…'
+                  : priceHistory.error ? 'histórico indisponível' : 'sem histórico suficiente'
+                : 'sem histórico suficiente'}
           </div>
         </div>
         <div className="bg-panel px-4 py-4">
-          <div className="eyebrow">Valor em estoque</div>
+          <div className="eyebrow">Valor conhecido em estoque</div>
           <div className="mt-2 num text-[21px] leading-none text-cream">
-            {money(itemValueCents(item))}
+            {itemCostKnown(item) ? money(itemValueCents(item)) : '—'}
           </div>
-          <div className="mt-2 text-[10.5px] text-muted">custo atual × saldo</div>
+          <div className="mt-2 text-[10.5px] text-muted">{itemCostKnown(item) ? 'custo atual × saldo' : 'cadastre o custo para calcular'}</div>
         </div>
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Fornecedor atual</div>
@@ -214,13 +443,13 @@ export function ItemDetailPage() {
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Última compra</div>
           <div className="mt-2 num text-[15px] leading-none text-cream">
-            {lastPurchaseLine
-              ? money(lastPurchaseLine.receivedUnitCostCents ?? lastPurchaseLine.expectedUnitCostCents)
+            {lastPurchaseReceipt
+              ? `${lastPurchaseReceipt.unitCostCents == null ? '—' : money(lastPurchaseReceipt.unitCostCents)}/${lastPurchaseReceipt.unit}`
               : '—'}
           </div>
           <div className="mt-2 text-[10.5px] text-muted">
-            {lastPurchase && lastPurchaseLine
-              ? `${lastPurchase.code} · ${shortDate(lastPurchase.receivedAt ?? lastPurchase.createdAt)}`
+            {lastPurchaseReceipt
+              ? `${lastPurchaseReceipt.purchase.code} · ${shortDate(lastPurchaseReceipt.receivedAt)}`
               : 'sem compras registradas'}
           </div>
         </div>
@@ -244,7 +473,8 @@ export function ItemDetailPage() {
               <div>
                 <div className="eyebrow">Preço mais recente</div>
                 <div className="mt-1.5 num text-[19px] text-cream">
-                  {money(offers[0]?.lastPriceCents ?? item.costCents)}
+                  {offers[0] && supplierOfferHasPrice(offers[0])
+                    ? money(offers[0].lastPriceCents) : itemCostKnown(item) ? money(item.costCents) : '—'}
                   <span className="ml-1 text-[11px] text-dim">/{item.unit}</span>
                 </div>
               </div>
@@ -260,6 +490,11 @@ export function ItemDetailPage() {
               ) : null}
             </div>
             <PriceChart points={points} />
+            {mode === 'production' && priceHistory?.itemId === item.id && priceHistory.error ? (
+              <p role="status" className="mt-3 text-[10.5px] text-warn">
+                Não foi possível confirmar o histórico de preços: {priceHistory.error}
+              </p>
+            ) : null}
 
             <div className="mt-4 scroll-x">
               <table className="table min-w-[560px]">
@@ -352,7 +587,7 @@ export function ItemDetailPage() {
                           </Link>
                         </td>
                         <td className="text-right num text-[12.5px] text-cream">
-                          {money(offer.lastPriceCents)}
+                          {supplierOfferHasPrice(offer) ? money(offer.lastPriceCents) : '—'}
                           <span className="ml-0.5 text-[10px] text-dim">/{item.unit}</span>
                         </td>
                         <td className="text-right num text-[11.5px] text-muted">
@@ -397,6 +632,11 @@ export function ItemDetailPage() {
               ) : null
             }
           >
+            {movementPage.error && movementPage.itemId === item.id ? <div className="px-4 py-2 text-[11px] text-warn">
+              Histórico incompleto: {movementPage.error}.
+              <button type="button" className="ml-1 underline" onClick={() => setMovementRetry((value) => value + 1)}>Tentar novamente</button>
+            </div> : null}
+            {movementPage.loading && movementPage.itemId === item.id && movements.length === 0 ? <div role="status" className="px-4 py-3 text-[11px] text-dim">Carregando movimentações…</div> : null}
             <div className="scroll-x">
               <table className="table min-w-[780px]">
                 <thead>
@@ -408,6 +648,7 @@ export function ItemDetailPage() {
                     <th>Origem</th>
                     <th>Usuário</th>
                     <th className="text-right">Saldo após</th>
+                    <th className="w-[58px]" />
                   </tr>
                 </thead>
                 <tbody>
@@ -446,21 +687,39 @@ export function ItemDetailPage() {
                         <td className="text-right num text-[11.5px] text-muted">
                           {fmtQty(movement.balanceAfter, movement.unit)}
                         </td>
+                        <td className="text-right">
+                          {can('stock.adjust') && movement.canReverse && !movement.reversedByMovementId ? (
+                            <button type="button" className="text-dim hover:text-copper"
+                              aria-label={`Estornar ${MOVEMENT_LABEL[movement.type]}`}
+                              title="Estornar movimentação"
+                              onClick={() => { setReversalTarget(movement.id); setReversalReason(''); }}>
+                              <RotateCcw size={13} />
+                            </button>
+                          ) : movement.reversedByMovementId ? (
+                            <span className="text-[10px] text-dim" title="Possui estorno compensatório">Estornada</span>
+                          ) : null}
+                        </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
             </div>
-            {movements.length > 12 ? (
+            {movements.length > 12 || (mode === 'production' && movementPage.itemId === item.id && movementPage.hasMore) ? (
               <div className="border-t border-line px-4 py-2.5">
-                <button
-                  type="button"
-                  className="text-[11px] text-dim hover:text-cream"
-                  onClick={() => setShowAll((prev) => !prev)}
-                >
-                  {showAll ? 'Mostrar menos' : `Mostrar todas as ${movements.length} movimentações`}
-                </button>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                  {movements.length > 12 ? <button type="button" className="text-[11px] text-dim hover:text-cream"
+                    onClick={() => setShowAll((previous) => !previous)}>
+                    {showAll ? 'Mostrar menos' : mode === 'production'
+                      ? 'Mostrar movimentações carregadas' : `Mostrar todas as ${movements.length} movimentações`}
+                  </button> : null}
+                  {mode === 'production' && movementPage.itemId === item.id && movementPage.hasMore && showAll ? (
+                    <button type="button" className="text-[11px] text-copper hover:text-cream"
+                      disabled={movementPage.loading} onClick={loadMoreMovements}>
+                      {movementPage.loading ? 'Carregando…' : 'Carregar movimentações mais antigas'}
+                    </button>
+                  ) : null}
+                </div>
               </div>
             ) : null}
           </Panel>
@@ -518,13 +777,21 @@ export function ItemDetailPage() {
                 })}
               </div>
             )}
+            {mode === 'production' && auditHasMore ? (
+              <div className="border-t border-line px-4 py-2.5">
+                <button type="button" className="text-[10px] text-copper hover:text-copper-hi disabled:opacity-50"
+                  onClick={() => { setShowAllAudit(true); void actions.loadMoreAudit(); }} disabled={auditLoading}>
+                  {auditLoading ? 'Carregando…' : 'Carregar auditoria anterior'}
+                </button>
+              </div>
+            ) : null}
           </Panel>
         </div>
 
         <div className="flex flex-col gap-5">
           <Panel
             title="Decisão de compra"
-            subtitle="Cálculo transparente com consumo recente."
+            subtitle={recommendation?.basis === 'minimum' ? 'Reposição para recompor o estoque mínimo.' : 'Cálculo transparente com consumo recente.'}
           >
             {recommendation ? (
               <>
@@ -536,39 +803,42 @@ export function ItemDetailPage() {
                 </div>
                 <div className="divide-y divide-line border-y border-line text-[11.5px]">
                   <div className="flex items-center justify-between py-2">
-                    <span className="text-muted">Consumo médio</span>
+                    <span className="text-muted">{recommendation.basis === 'minimum' ? 'Estoque mínimo' : 'Consumo médio'}</span>
                     <span className="num text-cream">
-                      {fmtQty(recommendation.avgDaily)} {item.unit}/dia
+                      {recommendation.basis === 'minimum'
+                        ? `${fmtQty(item.minQty)} ${item.unit}`
+                        : `${fmtQty(recommendation.avgDaily)} ${item.unit}/dia`}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between py-2">
-                    <span className="text-muted">Dias até reposição</span>
+                  {recommendation.basis === 'consumption' ? <div className="flex items-center justify-between py-2">
+                    <span className="text-muted">Horizonte base do cálculo</span>
                     <span className="num text-cream">{recommendation.coverageDays} dias</span>
-                  </div>
-                  <div className="flex items-center justify-between py-2">
+                  </div> : null}
+                  {recommendation.basis === 'consumption' ? <div className="flex items-center justify-between py-2">
                     <span className="text-muted">Estoque de segurança</span>
                     <span className="num text-cream">
                       {fmtQty(recommendation.safetyQty, item.unit)}
                     </span>
-                  </div>
+                  </div> : null}
                   <div className="flex items-center justify-between py-2">
                     <span className="text-muted">Estoque atual</span>
                     <span className="num text-cream">− {fmtQty(item.currentQty, item.unit)}</span>
                   </div>
                   <div className="flex items-center justify-between py-2">
                     <span className="text-muted">Custo estimado</span>
-                    <span className="num text-cream">{money(recommendation.estimatedCostCents)}</span>
+                    <span className="num text-cream">{recommendation.estimatedCostCents == null ? '—' : money(recommendation.estimatedCostCents)}</span>
                   </div>
                 </div>
                 <p className="mt-2.5 font-mono text-[9.5px] leading-relaxed text-dim">
                   {recommendation.formula}
                 </p>
                 <p className="mt-2 text-[10.5px] text-dim">
-                  Próxima compra em {Math.max(1, Math.round(recommendation.daysRemaining))} dias · prazo
-                  do fornecedor {recommendation.leadTimeDays} dias.
+                  {recommendation.basis === 'minimum'
+                    ? 'Quantidade calculada para recompor o estoque mínimo; não representa previsão de consumo.'
+                    : `${recommendation.item.currentQty <= 0 ? 'Sem saldo disponível' : `Saldo atual cobre cerca de ${recommendation.daysRemaining < 1 ? 'menos de 1 dia' : `${Math.round(recommendation.daysRemaining)} dias`} ao consumo médio`}. Prazo do fornecedor: ${recommendation.leadTimeDays} dias.`}
                 </p>
                 {can('purchases.manage') ? (
-                  <Link to="/compras?novo=1" className="btn btn-ghost mt-3 w-full">
+                  <Link to={`/compras?${new URLSearchParams({ novo: '1', item: item.id, qty: String(recommendation.recommendedQty), ...(primary?.supplierId ? { supplier: primary.supplierId } : {}) }).toString()}`} className="btn btn-ghost mt-3 w-full">
                     <ClipboardList size={13} />
                     Planejar pedido de compra
                   </Link>
@@ -577,12 +847,12 @@ export function ItemDetailPage() {
             ) : (
               <>
                 <p className="text-[12px] leading-relaxed text-muted">
-                  O estoque atual cobre o consumo previsto. Não há reposição recomendada hoje.
+                  Não há reposição recomendada pelos critérios atuais. Com histórico registrado, o cálculo considera consumo recente.
                 </p>
                 <div className="mt-3 flex items-center justify-between border-t border-line pt-3">
-                  <span className="text-[11px] text-dim">Cobertura estimada</span>
+                  <span className="text-[11px] text-dim">Situação do mínimo</span>
                   <span className="num text-[13px] text-cream">
-                    {item.currentQty <= 0 ? 'sem saldo' : 'estável'}
+                    {item.currentQty < item.minQty ? 'abaixo' : 'atendido'}
                   </span>
                 </div>
               </>
@@ -668,7 +938,7 @@ export function ItemDetailPage() {
             <button type="button" className="btn btn-ghost" onClick={() => setMovementOpen(false)}>
               Cancelar
             </button>
-            <button type="button" className="btn btn-primary" onClick={submitMovement}>
+            <button type="button" className="btn btn-primary" onClick={submitMovement} disabled={!validMovementDraft}>
               Confirmar movimentação
             </button>
           </>
@@ -714,23 +984,25 @@ export function ItemDetailPage() {
                   value={quantity}
                   onChange={(event) => setQuantity(event.target.value)}
                   placeholder="0"
+                  aria-invalid={quantity.trim().length > 0 && parsedMovementQty == null}
                 />
                 <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-[11px] text-dim">
                   {item.unit}
                 </span>
               </div>
+              {quantity.trim().length > 0 && parsedMovementQty == null ? <p role="alert" className="mt-1 text-[10.5px] text-danger">Informe uma quantidade válida, positiva e com até 3 casas decimais.</p> : null}
+              {kind === 'out' && typedQty > item.currentQty + 0.0001 ? <p role="alert" className="mt-1 text-[10.5px] text-danger">A saída excede o saldo disponível.</p> : null}
             </Field>
             <Field label="Resultado" hint="Saldo após a movimentação">
               <div className="flex h-9 items-center justify-between border border-line bg-[#0b0b0a] px-2.5">
                 <span className={`num text-[13px] ${adjustPreview < 0 ? 'text-danger' : 'text-cream'}`}>
                   {fmtQty(adjustPreview, item.unit)}
                 </span>
-                {kind !== 'adjust' && Number(quantity.replace(',', '.')) > 0 ? (
-                  <Money
-                    cents={Math.round(Number(quantity.replace(',', '.')) * item.costCents)}
-                    className="text-[10.5px] text-dim"
-                  />
-                ) : null}
+                {kind !== 'adjust' && typedQty > 0
+                  ? movementEstimate == null
+                    ? <span className="text-[10px] text-warn">Custo não cadastrado</span>
+                    : <Money cents={movementEstimate} className="text-[10.5px] text-dim" />
+                  : null}
               </div>
             </Field>
           </div>
@@ -739,6 +1011,7 @@ export function ItemDetailPage() {
             <input
               id="mov-reason"
               className="input"
+              required
               value={reason}
               onChange={(event) => setReason(event.target.value)}
               placeholder={
@@ -758,6 +1031,105 @@ export function ItemDetailPage() {
         </div>
       </Drawer>
 
+      <Drawer
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        eyebrow="Estoque / Cadastro"
+        title="Editar insumo"
+        description="Atualize os dados operacionais e mantenha o histórico de estoque preservado."
+        footer={
+          <>
+            <button type="button" className="btn btn-ghost" onClick={() => setEditOpen(false)}>
+              Cancelar
+            </button>
+            <button type="button" className="btn btn-primary" onClick={saveEdit} disabled={!editName.trim() || parseConversionDrafts(editConversions) === null}>
+              Salvar alterações
+            </button>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <Field label="Nome do insumo" htmlFor="edit-item-name">
+            <input id="edit-item-name" className="input" value={editName} onChange={(e) => setEditName(e.target.value)} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Categoria" htmlFor="edit-item-category">
+              <select id="edit-item-category" className="input" value={editCategory} onChange={(e) => setEditCategory(e.target.value as (typeof CATEGORIES)[number])}>
+                {CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+              </select>
+            </Field>
+            <Field label={`Estoque mínimo (${item.unit})`} htmlFor="edit-item-min">
+              <input id="edit-item-min" className="input num" inputMode="decimal" value={editMinQty} onChange={(e) => setEditMinQty(e.target.value)} />
+            </Field>
+          </div>
+          <ConversionEditor baseUnit={item.unit as Unit} value={editConversions} onChange={setEditConversions} />
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={`Custo atual / ${item.unit}`} htmlFor="edit-item-cost">
+              <input id="edit-item-cost" className="input num" inputMode="decimal" value={editCost} onChange={(e) => setEditCost(e.target.value)} />
+            </Field>
+            <Field label="Fornecedor principal" htmlFor="edit-item-supplier">
+              <select id="edit-item-supplier" className="input" value={editSupplier} onChange={(e) => {
+                const nextId = e.target.value;
+                setEditSupplier(nextId);
+                const selected = supplierOptions.find((supplier) => supplier.id === nextId);
+                if (selected) actions.cacheSupplier(selected);
+              }}>
+                <option value="">Não definido</option>
+                {supplierOptions.filter((supplier) => supplier.active !== false).map((supplier) => (
+                  <option key={supplier.id} value={supplier.id}>{supplier.name}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          {mode === 'production' && supplierOptionsHasMore ? <button type="button"
+            className="text-left text-[10.5px] text-copper hover:text-cream" disabled={supplierOptionsLoadingMore}
+            onClick={loadMoreSuppliers}>{supplierOptionsLoadingMore ? 'Carregando fornecedores…' : 'Carregar mais fornecedores'}</button> : null}
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Código interno" htmlFor="edit-item-code">
+              <input id="edit-item-code" className="input" value={editInternalCode} onChange={(e) => setEditInternalCode(e.target.value)} />
+            </Field>
+            <Field label="Código de barras" htmlFor="edit-item-barcode">
+              <input id="edit-item-barcode" className="input" value={editBarcode} onChange={(e) => setEditBarcode(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Observações" htmlFor="edit-item-notes">
+            <textarea id="edit-item-notes" className="input min-h-20 resize-y" value={editNotes} onChange={(e) => setEditNotes(e.target.value)} />
+          </Field>
+          <label className="flex items-center gap-2 border border-line bg-[#0b0b0a] px-3 py-2.5 text-[12px] text-muted">
+            <input type="checkbox" checked={editActive} onChange={(e) => setEditActive(e.target.checked)} />
+            Insumo ativo
+          </label>
+        </div>
+      </Drawer>
+
+      <Dialog
+        open={reversalTarget !== null}
+        onClose={() => setReversalTarget(null)}
+        title="Estornar movimentação"
+        footer={
+          <>
+            <button type="button" className="btn btn-ghost" onClick={() => setReversalTarget(null)}>Cancelar</button>
+            <button type="button" className="btn btn-primary" disabled={reversalReason.trim().length < 3}
+              onClick={async () => {
+                if (!reversalTarget) return;
+                const ok = await actions.reverseMovement(reversalTarget, reversalReason);
+                if (ok) { setReversalTarget(null); setReversalReason(''); }
+              }}>
+              Confirmar estorno
+            </button>
+          </>
+        }
+      >
+        <p className="mb-3 text-[12px] leading-relaxed text-muted">
+          O sistema criará uma movimentação compensatória e manterá o lançamento original no histórico.
+          A operação depende do saldo atual disponível.
+        </p>
+        <Field label="Motivo do estorno" htmlFor="movement-reversal-reason">
+          <textarea id="movement-reversal-reason" className="input min-h-20 resize-y" maxLength={300}
+            value={reversalReason} onChange={(event) => setReversalReason(event.target.value)} />
+        </Field>
+      </Dialog>
+
       <Dialog
         open={confirmAdjust}
         onClose={() => setConfirmAdjust(false)}
@@ -770,6 +1142,7 @@ export function ItemDetailPage() {
             <button
               type="button"
               className="btn btn-primary"
+              disabled={!validMovementDraft}
               onClick={async () => {
                 const ok = await actions.recordMovement({
                   itemId: item.id,

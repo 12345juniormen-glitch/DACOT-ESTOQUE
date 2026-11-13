@@ -1,8 +1,9 @@
 # DACOT — Módulo de Estoque & Compras
 
-Base operacional do módulo de Estoque & Compras para restaurantes, com a identidade visual da
-plataforma DACOT. Esta é a V1 de interface: dados de demonstração realistas, fluxos completos e
-arquitetura preparada para o backend e para a integração com o DACOT Pedidos.
+Base operacional do módulo DACOT Estoque & Compras para restaurantes. O repositório contém um
+frontend React + TypeScript + Vite e uma API FastAPI independente, com persistência MongoDB,
+autenticação por handoff do DACOT-HUB e isolamento de dados por restaurante. A integração com o
+DACOT-PEDIDOS continua fora do escopo desta V1.
 
 Restaurante demonstrativo: **Brasa do Centro** (Santos · SP).
 
@@ -14,9 +15,12 @@ npm run dev      # http://localhost:3000
 npm run build    # typecheck + build de produção
 ```
 
+Para executar a API local e configurar MongoDB, autenticação e serviços hospedados, consulte
+[`backend/README.md`](backend/README.md). Builds de produção operam em modo real e não carregam os
+dados de demonstração.
+
 Stack: React 18, TypeScript, Vite, Tailwind CSS 4, React Router 6, Lucide. Fontes Instrument Sans
-(variável) e IBM Plex Mono embarcadas via Fontsource. Nenhum backend nesta versão: o estado vive em
-memória e volta aos dados demo ao recarregar.
+(variável) e IBM Plex Mono embarcadas via Fontsource.
 
 ## Telas
 
@@ -49,33 +53,28 @@ ruptura, custo em alta, divergência, perda e compra recomendada; nunca um dashb
 
 ## Decisões de domínio
 
-- **Dinheiro em centavos inteiros.** Todo valor monetário é `Cents` (`R$ 31,90 → 3190`), com
-  formatação em `src/domain/format.ts`. Não há aritmética monetária em float.
-- **Multi-tenant desde o modelo.** Todas as entidades carregam `restaurantId`; consultas e ações
-  são sempre no escopo do restaurante atual. O tenant demo é `rest-brasa-centro`.
-- **Estoque é um livro de movimentações.** `InventoryItem.currentQty` é o saldo corrente, mas toda
-  alteração gera `Movement` com tipo, direção, quantidade, motivo, origem, usuário, custo e saldo
-  resultante. Ajustes nunca sobrescrevem o saldo anterior.
-- **Estoque teórico × real.** Consumo de pedidos gera baixas `CONSUMPTION`. A contagem física
-  compara o esperado congelado no início da contagem com o contado e gera `ADJUSTMENT` na aprovação.
+- **Dinheiro em centavos inteiros.** Todo valor monetário persistido e exibido é `Cents`
+  (`R$ 31,90 → 3190`). O custo da ficha arredonda cada linha para o centavo mais próximo, meio
+  centavo para cima, e soma os valores inteiros; frontend e backend seguem a mesma regra.
+- **Multi-tenant.** A API deriva o restaurante da sessão validada pelo DACOT-HUB e escopa as
+  consultas/escritas ao `restaurant_id` autenticado. Os dados de demonstração usam um tenant local
+  isolado.
+- **Estoque é um livro de movimentações.** A API guarda saldo corrente junto de movimentos com
+  tipo, quantidade, motivo, origem, usuário, custo e saldo resultante. Ajustes são registrados.
+- **Estoque teórico × contado.** Contagens comparam o saldo congelado no início à quantidade
+  informada e, na aprovação, geram ajustes auditáveis.
 - **Custos versionados.** `RecipeSnapshot` congela o custo da ficha na época. Recebimentos e
-  alterações de ficha geram novos snapshots; pedidos já realizados não são reescritos.
+  alterações de ficha geram novos snapshots; pedidos já realizados não são reescritos. As linhas
+  descrevem o lote completo; rendimento divide o custo do lote em custo por porção e ambos ficam
+  congelados no snapshot. Fichas legadas sem rendimento equivalem a uma porção.
 - **Preço é histórico.** `PricePoint` registra cada preço recebido, por insumo e fornecedor. A
   variação de 120 dias e as recomendações derivam desses pontos.
 
-## Integração com DACOT Pedidos
+## Integração com DACOT-PEDIDOS
 
-Contrato preparado em `src/domain/events.ts`:
-
-- Eventos: `ORDER_CREATED`, `ORDER_UPDATED`, `ORDER_DELIVERED`, `ORDER_CANCELLED`.
-- Apenas `ORDER_DELIVERED` consome estoque; cancelamento não baixa.
-- `ORDER_DELIVERED` → linhas do pedido → ficha técnica vigente → consumo por insumo →
-  movimentações `CONSUMPTION` → saldo teórico.
-- **Idempotência por `event.id`.** O ID processado é persistido em `processedEventIds`; reprocessar
-  o mesmo evento retorna `duplicate` e não gera baixa. O painel da Visão Geral permite simular uma
-  entrega e reprocessar o último evento para verificar essa proteção.
-- Nenhuma leitura direta de estruturas internas do Pedidos: o módulo só conhece o contrato do
-  evento (`orderId`, `occurredAt`, `lines[{ recipeId, qty }]`).
+Não está habilitada nesta V1. O estoque real não consome eventos de pedido e não deve ser
+considerado sincronizado com vendas. A integração futura deverá usar contrato autenticado,
+idempotente e desacoplado, com baixa de estoque baseada nas fichas técnicas vigentes.
 
 ## RBAC
 
@@ -89,11 +88,10 @@ Contrato preparado em `src/domain/events.ts`:
 | Perdas | total | total | — |
 | Auditoria | ver | ver | — |
 
-O seletor **Perfil** no topo alterna entre Carlos (Administrador), Marina (Gerente) e Rafael
-(Operador) para demonstrar restrições de navegação, ações e aprovação. Rotas restritas exibem uma
-página de acesso restrito em vez de quebrar.
+No modo de demonstração, o seletor **Perfil** alterna usuários fictícios para mostrar a navegação.
+Em produção, papel e permissões vêm da sessão do HUB e são validados pela API.
 
-## Dados demo
+## Modo de demonstração
 
 - 25 insumos em 8 categorias, com mínimos, custos e fornecedores.
 - 4 fornecedores, ofertas e histórico de preços (incluindo 6 itens em alta no período).
@@ -102,7 +100,9 @@ página de acesso restrito em vez de quebrar.
 - O livro de movimentações fecha exatamente no saldo atual de cada insumo; a abertura implícita é
   calculada para que compras + entradas − consumo − perdas − ajustes = saldo final.
 
-Ao recarregar, os dados demo são restaurados.
+O modo de demonstração existe apenas para desenvolvimento local. Em builds de produção, o app usa
+a API; se a configuração da API estiver ausente ou indisponível, os dados demonstrativos não são
+usados como substituto dos dados reais.
 
 ## Fora do escopo desta V1
 
@@ -116,16 +116,13 @@ consumo médio diário × dias de cobertura + estoque de segurança − estoque 
 
 O cálculo aparece nas telas com os números usados. Nada é apresentado como IA.
 
-## Verificação
+## Estado da V1 e homologação
 
-- `npx tsc --noEmit` e `npm run build` sem erros.
-- Renderização das 13 rotas (incluindo detalhes, 404 e acesso restrito) validada em smoke test.
-- Fluxos exercitados em DOM: recebimento com entrada em estoque, contagem criada e aprovada, perda
-  registrada, evento de pedido idempotente, troca de perfil com bloqueio de rotas e permissões.
+A API implementa persistência de ingredientes, fornecedores, movimentos, compras e recebimentos,
+fichas técnicas e snapshots de custo, contagens, perdas e auditoria. As mutações operacionais são
+escopadas ao restaurante autenticado e usam transações e chaves de idempotência onde aplicável.
+Consulte [`docs/V1_GAP_MAP.md`](docs/V1_GAP_MAP.md) para lacunas e evidências de teste atualizadas.
 
-## Pendências naturais para a próxima etapa
-
-1. Backend e persistência multi-tenant, com validação de permissões por requisição.
-2. Autenticação real e vínculo usuário–restaurante.
-3. Contrato do DACOT Pedidos (fila/webhook) e assinatura/verificação dos eventos.
-4. Migração dos dados demo para dados reais e políticas de fechamento de contagem.
+Autenticação publicada, conexão com Atlas, cookie entre os domínios hospedados e handoff real do
+HUB ainda requerem configuração e homologação controlada. Não trate a V1 como operacional em
+produção antes dessas verificações. O backend não foi publicado por esta alteração.

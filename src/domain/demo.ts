@@ -323,12 +323,14 @@ interface RecipeSeed {
   id: string;
   name: string;
   salePriceCents: Cents;
+  yieldPortions?: number;
   ingredients: { itemId: string; qty: number; unit: Unit }[];
 }
 
 const RECIPE_SEEDS: RecipeSeed[] = [
   {
     id: 'rc-xburger', name: 'X-Burger Artesanal', salePriceCents: 2890,
+    yieldPortions: 1,
     ingredients: [
       { itemId: 'it-pao', qty: 1, unit: 'un' },
       { itemId: 'it-carne', qty: 160, unit: 'g' },
@@ -342,6 +344,7 @@ const RECIPE_SEEDS: RecipeSeed[] = [
   },
   {
     id: 'rc-duplo', name: 'Duplo Brasa', salePriceCents: 3890,
+    yieldPortions: 1,
     ingredients: [
       { itemId: 'it-pao', qty: 1, unit: 'un' },
       { itemId: 'it-carne', qty: 300, unit: 'g' },
@@ -651,6 +654,7 @@ export function createDemoState(): AppState {
     currentQty: seed.qty,
     minQty: seed.min,
     costCents: seed.cost,
+    costKnown: seed.cost > 0,
     primarySupplierId: seed.primary,
     updatedAt: NOW_ISO,
   }));
@@ -660,9 +664,11 @@ export function createDemoState(): AppState {
     restaurantId: RID,
     name: seed.name,
     salePriceCents: seed.salePriceCents,
+    yieldPortions: seed.yieldPortions ?? 1,
     ingredients: seed.ingredients,
     createdAt: daysAgoISO(150, 10),
     updatedAt: daysAgoISO(12, 10),
+    version: 1,
   }));
 
   const purchases: Purchase[] = PURCHASE_SEEDS.map((seed) => ({
@@ -861,7 +867,7 @@ export function createDemoState(): AppState {
       qty: loss.qty,
       at: loss.at,
       type: 'LOSS',
-      unitCostCents: Math.round(loss.valueCents / loss.qty),
+      unitCostCents: Math.round((loss.valueCents ?? 0) / loss.qty),
       reason: loss.reason,
       origin: `Perda ${loss.id.toUpperCase()}`,
       userId: loss.userId,
@@ -1099,6 +1105,7 @@ export function createDemoState(): AppState {
   ];
 
   return {
+    asOf: NOW_ISO,
     restaurant: RESTAURANT,
     users: USERS,
     currentUserId: 'u-carlos',

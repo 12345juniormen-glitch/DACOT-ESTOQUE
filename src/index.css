@@ -186,6 +186,10 @@
     @apply text-ok;
   }
 
+  .status-near_minimum {
+    @apply text-copper;
+  }
+
   .status-attention {
     @apply text-warn;
   }

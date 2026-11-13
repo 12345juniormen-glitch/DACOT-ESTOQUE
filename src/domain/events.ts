@@ -37,7 +37,7 @@ export function applyOrderDelivered(state: AppState, event: OrderEvent): Deliver
     for (const ingredient of recipe.ingredients) {
       const item = state.items.find((i) => i.id === ingredient.itemId);
       if (!item) continue;
-      const perUnit = convertQty(ingredient.qty, ingredient.unit, item.unit);
+      const perUnit = convertQty(ingredient.qty, ingredient.unit, item.unit, item.unit, item.conversions);
       totals.set(item.id, (totals.get(item.id) ?? 0) + perUnit * line.qty);
     }
   }
@@ -101,7 +101,7 @@ export function expectedConsumption(state: AppState, recipeId: string, quantity:
     return [
       {
         item,
-        qty: convertQty(ingredient.qty, ingredient.unit, item.unit) * quantity,
+        qty: convertQty(ingredient.qty, ingredient.unit, item.unit, item.unit, item.conversions) * quantity,
       },
     ];
   });

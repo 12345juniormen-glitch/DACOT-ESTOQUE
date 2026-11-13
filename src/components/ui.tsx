@@ -79,7 +79,9 @@ export function StatusTag({ status, className = '' }: { status: ItemStatus; clas
   if (status === 'normal') return null;
   return (
     <span className={`status status-${status} ${className}`}>
-      {status === 'empty' ? '● Sem estoque' : status === 'critical' ? '● Crítico' : '· Atenção'}
+      {status === 'empty' ? '● Sem estoque'
+        : status === 'critical' ? '● Crítico'
+          : status === 'attention' ? '· Abaixo do mínimo' : '· Próximo do mínimo'}
     </span>
   );
 }

@@ -1,27 +1,33 @@
-import { useEffect, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, type ReactNode } from 'react';
 import { BrowserRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { AppProvider, useApp } from './state/AppStore';
+import { DACOT_HUB_MODULES_URL } from './lib/api';
 import type { Permission } from './domain/permissions';
 import { AppShell } from './components/Layout';
-import { OverviewPage } from './pages/Overview';
-import { InventoryPage } from './pages/Inventory';
-import { ItemDetailPage } from './pages/ItemDetail';
-import { CountsPage } from './pages/Counts';
-import { CountSessionPage } from './pages/CountSession';
-import { PurchasesPage } from './pages/Purchases';
-import { PurchaseDetailPage } from './pages/PurchaseDetail';
-import { ReceivePurchasePage } from './pages/ReceivePurchase';
-import { SuppliersPage } from './pages/Suppliers';
-import { SupplierDetailPage } from './pages/SupplierDetail';
-import { RecipesPage } from './pages/Recipes';
-import { RecipeDetailPage } from './pages/RecipeDetail';
-import { LossesPage } from './pages/Losses';
 import { ForbiddenPage, NotFoundPage } from './pages/System';
+
+const OverviewPage = lazy(() => import('./pages/Overview').then((module) => ({ default: module.OverviewPage })));
+const InventoryPage = lazy(() => import('./pages/Inventory').then((module) => ({ default: module.InventoryPage })));
+const ItemDetailPage = lazy(() => import('./pages/ItemDetail').then((module) => ({ default: module.ItemDetailPage })));
+const CountsPage = lazy(() => import('./pages/Counts').then((module) => ({ default: module.CountsPage })));
+const CountSessionPage = lazy(() => import('./pages/CountSession').then((module) => ({ default: module.CountSessionPage })));
+const PurchasesPage = lazy(() => import('./pages/Purchases').then((module) => ({ default: module.PurchasesPage })));
+const PurchaseDetailPage = lazy(() => import('./pages/PurchaseDetail').then((module) => ({ default: module.PurchaseDetailPage })));
+const ReceivePurchasePage = lazy(() => import('./pages/ReceivePurchase').then((module) => ({ default: module.ReceivePurchasePage })));
+const SuppliersPage = lazy(() => import('./pages/Suppliers').then((module) => ({ default: module.SuppliersPage })));
+const SupplierDetailPage = lazy(() => import('./pages/SupplierDetail').then((module) => ({ default: module.SupplierDetailPage })));
+const RecipesPage = lazy(() => import('./pages/Recipes').then((module) => ({ default: module.RecipesPage })));
+const RecipeDetailPage = lazy(() => import('./pages/RecipeDetail').then((module) => ({ default: module.RecipeDetailPage })));
+const LossesPage = lazy(() => import('./pages/Losses').then((module) => ({ default: module.LossesPage })));
 
 function Gate({ permission, children }: { permission: Permission; children: ReactNode }) {
   const { can } = useApp();
   if (!can(permission)) return <ForbiddenPage />;
-  return <>{children}</>;
+  return (
+    <Suspense fallback={<div className="grid min-h-[50vh] place-items-center bg-base px-6 text-sm text-muted">Abrindo página…</div>}>
+      {children}
+    </Suspense>
+  );
 }
 
 function ScrollToTop() {
@@ -43,6 +49,12 @@ function RuntimeGate({ children }: { children: ReactNode }) {
         <div className="max-w-md">
           <h1 className="text-lg font-semibold text-cream">Não foi possível abrir o Estoque</h1>
           <p className="mt-2 text-sm text-muted">{startupError}</p>
+          <p className="mt-3 text-xs leading-relaxed text-dim">
+            O acesso ao Estoque começa no portal do DACOT-HUB. Entre com sua conta e abra o módulo por lá.
+          </p>
+          <a className="btn btn-ghost mt-4" href={DACOT_HUB_MODULES_URL}>
+            Entrar pelo DACOT-HUB
+          </a>
           <button type="button" className="btn btn-primary mt-5" onClick={() => window.location.reload()}>
             Tentar novamente
           </button>

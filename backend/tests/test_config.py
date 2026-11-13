@@ -29,3 +29,29 @@ def test_handoff_issuer_and_audience_are_fixed_to_inventory_contract():
         Settings(handoff_issuer="other-hub")
     with pytest.raises(ValueError):
         Settings(handoff_audience="dacot-orders")
+
+
+@pytest.mark.parametrize("environment", ["prodution", "staging", "Production", ""])
+def test_unknown_environment_names_are_rejected_instead_of_disabling_production_guards(environment):
+    with pytest.raises(ValueError):
+        Settings(environment=environment)
+
+
+@pytest.mark.parametrize("hub_url", [
+    "http://hub.example.com", "https://user:password@hub.example.com",
+    "https://hub.example.com/api", "https://hub.example.com?next=/",
+])
+def test_production_rejects_insecure_or_non_origin_hub_urls(hub_url):
+    with pytest.raises(ValueError):
+        Settings(environment="production", hub_base_url=hub_url,
+                 cors_origins=["https://estoque.dacot.com.br"])
+
+
+def test_production_accepts_https_hub_origin():
+    settings = Settings(environment="production", hub_base_url="https://hub.dacot.com.br",
+        cors_origins=["https://estoque.dacot.com.br"])
+    assert settings.hub_base_url == "https://hub.dacot.com.br"
+
+
+def test_local_mongodb_default_declares_the_required_replica_set():
+    assert "replicaSet=rs0" in Settings(_env_file=None).mongodb_uri

@@ -171,15 +171,25 @@ def principal_from_session(request: Request, settings: Settings) -> Principal:
         raise HTTPException(status_code=401, detail="Authenticated DACOT session required")
     if session.get("role") not in VALID_ROLES or not isinstance(session.get("hub_access"), dict):
         raise HTTPException(status_code=401, detail="Invalid DACOT-HUB session")
+    session_identity = {
+        "user_id": session["user_id"], "restaurant_id": session["restaurant_id"],
+        "role": session["role"], "hub_access": dict(session["hub_access"]),
+    }
     hub_confirms_access({
-        "sub": f"tenant_user:{session['user_id']}",
-        "restaurant_id": session["restaurant_id"],
-        "role": session["role"],
-        "hub_access": session["hub_access"],
+        "sub": f"tenant_user:{session_identity['user_id']}",
+        "restaurant_id": session_identity["restaurant_id"],
+        "role": session_identity["role"],
+        "hub_access": session_identity["hub_access"],
     }, settings)
-    database.auth_sessions.update_one({"_id": session["_id"]}, {"$set": {"last_seen_at": now}})
-    return Principal(session["user_id"], session["restaurant_id"],
-                     (session["role"],), session.get("restaurant_slug"))
+    still_active = database.auth_sessions.update_one({
+        "_id": session["_id"], "revoked_at": None,
+        "access_expires_at": {"$gt": now}, "expires_at": {"$gt": now},
+        **session_identity,
+    }, {"$set": {"last_seen_at": now}})
+    if still_active.matched_count != 1:
+        raise HTTPException(status_code=401, detail="Authenticated DACOT session required")
+    return Principal(session_identity["user_id"], session_identity["restaurant_id"],
+                     (session_identity["role"],), session.get("restaurant_slug"))
 
 
 def authenticated_principal(request: Request, settings: Settings = Depends(get_settings)) -> Principal:
@@ -197,6 +207,10 @@ def require_any_role(*allowed_roles: str):
 
 def issue_browser_binding() -> str:
     return secrets.token_urlsafe(32)
+
+
+def valid_browser_binding(value: str | None) -> bool:
+    return bool(value and re.fullmatch(r"[A-Za-z0-9_-]{43}", value))
 
 
 def create_local_session(db, *, binding: str, tab_id: str, claims: dict) -> None:
@@ -238,14 +252,20 @@ def refresh_local_session(db, *, binding: str, tab_id: str, settings: Settings) 
         raise HTTPException(status_code=401, detail="Session expired")
     if session.get("role") not in VALID_ROLES or not isinstance(session.get("hub_access"), dict):
         raise HTTPException(status_code=401, detail="Invalid DACOT-HUB session")
+    session_identity = {
+        "user_id": session["user_id"], "restaurant_id": session["restaurant_id"],
+        "role": session["role"], "hub_access": dict(session["hub_access"]),
+    }
     hub_confirms_module_active({
-        "sub": f"tenant_user:{session['user_id']}",
-        "restaurant_id": session["restaurant_id"],
-        "role": session["role"],
-        "hub_access": session["hub_access"],
+        "sub": f"tenant_user:{session_identity['user_id']}",
+        "restaurant_id": session_identity["restaurant_id"],
+        "role": session_identity["role"],
+        "hub_access": session_identity["hub_access"],
     }, settings)
     result = db.auth_sessions.update_one(
-        {"_id": session["_id"], "revoked_at": None, "refresh_expires_at": {"$gt": now}},
+        {"_id": session["_id"], "revoked_at": None,
+         "refresh_expires_at": {"$gt": now}, "expires_at": {"$gt": now},
+         **session_identity},
         {"$set": {"access_expires_at": now + ACCESS_TTL, "last_seen_at": now}},
     )
     if result.modified_count != 1:

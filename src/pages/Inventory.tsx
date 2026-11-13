@@ -1,23 +1,69 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Boxes, ChevronRight, ClipboardList, Plus, Search } from 'lucide-react';
 import { useApp } from '../state/AppStore';
 import { CATEGORIES, STATUS_LABEL, UNIT_LABEL, type ItemStatus, type Unit } from '../domain/types';
-import { itemStatus, itemValueCents, stockValueCents } from '../domain/selectors';
-import { money, parseMoney, parseQty, qty as fmtQty } from '../domain/format';
+import { compareReplenishmentPriority, itemCostKnown, itemStatus, itemValueCents, itemsWithoutCost, stockValueCents } from '../domain/selectors';
+import { money, parseOptionalNonNegativeMoney, parseQty, qty as fmtQty } from '../domain/format';
 import { Drawer, EmptyState, Field, PageHeader, Panel, StatusTag } from '../components/ui';
+import { ConversionEditor, parseConversionDrafts, type ConversionDraft } from '../components/ConversionEditor';
+import { valueForTenant } from '../domain/tenant-snapshot';
+import { fetchApiInventoryInsights, fetchApiInventoryPage, fetchApiSupplierPage,
+  fetchApiSuppliersByIds, type ApiInventoryInsights } from '../lib/api';
 
-const STATUS_ORDER: ItemStatus[] = ['normal', 'attention', 'critical', 'empty'];
+const STATUS_ORDER: ItemStatus[] = ['normal', 'near_minimum', 'attention', 'critical', 'empty'];
+const PAGE_SIZE = 50;
 
-type SortKey = 'name' | 'value' | 'qty' | 'updated' | 'cost';
+type SortKey = 'name' | 'value' | 'qty' | 'updated' | 'cost' | 'priority';
 
 export function InventoryPage() {
-  const { state, actions, can } = useApp();
+  const { state, actions, can, mode, ready, notify } = useApp();
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('all');
   const [status, setStatus] = useState<'all' | ItemStatus | 'needs-attention'>('all');
   const [sort, setSort] = useState<SortKey>('name');
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [remoteItems, setRemoteItems] = useState<typeof state.items>([]);
+  const [remoteHasMore, setRemoteHasMore] = useState(false);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteLoadingMore, setRemoteLoadingMore] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+  const [remoteInsightsState, setRemoteInsightsState] = useState<{
+    tenantId: string; value: ApiInventoryInsights | null; error: boolean;
+  }>({ tenantId: '', value: null, error: false });
+  const [remoteFilteredTotal, setRemoteFilteredTotal] = useState<number | null>(null);
+  const [remoteFilteredSummary, setRemoteFilteredSummary] = useState<{
+    known_stock_value_cents: number; without_cost: number;
+  } | null>(null);
+  const [insightRetry, setInsightRetry] = useState(0);
+  const [clientVisibleCount, setClientVisibleCount] = useState(PAGE_SIZE);
+  const [queryRetry, setQueryRetry] = useState(0);
+  const requestGeneration = useRef(0);
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
+
+  useEffect(() => {
+    if (mode !== 'production' || !ready || !state.restaurant.id) {
+      setRemoteInsightsState({ tenantId: '', value: null, error: false });
+      return;
+    }
+    let current = true;
+    const tenantId = state.restaurant.id;
+    void fetchApiInventoryInsights().then((value) => {
+      if (current) setRemoteInsightsState({ tenantId, value, error: false });
+    }).catch(() => {
+      if (current) setRemoteInsightsState({ tenantId, value: null, error: true });
+    });
+    return () => { current = false; };
+  }, [mode, ready, state.restaurant.id, insightRetry]);
+
+  const remoteInsights = valueForTenant(remoteInsightsState.tenantId
+    ? { tenantId: remoteInsightsState.tenantId, value: remoteInsightsState.value } : null,
+  state.restaurant.id);
+  const insightsFailed = mode === 'production'
+    && remoteInsightsState.tenantId === state.restaurant.id && remoteInsightsState.error;
+  const insightsLoading = mode === 'production' && ready && !!state.restaurant.id
+    && !remoteInsights && !insightsFailed;
 
   const [name, setName] = useState('');
   const [newCategory, setNewCategory] = useState<(typeof CATEGORIES)[number]>('Carnes');
@@ -26,14 +72,68 @@ export function InventoryPage() {
   const [cost, setCost] = useState('');
   const [initialQty, setInitialQty] = useState('0');
   const [supplierId, setSupplierId] = useState('');
+  const [supplierOptions, setSupplierOptions] = useState(state.suppliers);
+  const [supplierOptionsHasMore, setSupplierOptionsHasMore] = useState(false);
+  const [supplierOptionsLoadingMore, setSupplierOptionsLoadingMore] = useState(false);
+  const [conversions, setConversions] = useState<ConversionDraft[]>([]);
+  const parsedConversions = parseConversionDrafts(conversions);
+
+  useEffect(() => {
+    if (!drawerOpen || mode !== 'production') return;
+    let active = true;
+    void fetchApiSupplierPage('', 0, 50, false).then((page) => {
+      if (active) {
+        setSupplierOptions(page.suppliers);
+        setSupplierOptionsHasMore(page.hasMore);
+      }
+    }).catch((error: unknown) => {
+      if (active) notify(error instanceof Error ? error.message : 'Não foi possível carregar fornecedores.', 'error');
+    });
+    return () => { active = false; };
+  }, [drawerOpen, mode, notify]);
+
+  const loadMoreSuppliers = async () => {
+    if (supplierOptionsLoadingMore || !supplierOptionsHasMore) return;
+    setSupplierOptionsLoadingMore(true);
+    try {
+      const page = await fetchApiSupplierPage('', supplierOptions.length, 50, false);
+      setSupplierOptions((previous) => [...previous,
+        ...page.suppliers.filter((supplier) => !previous.some((entry) => entry.id === supplier.id))]);
+      setSupplierOptionsHasMore(page.hasMore);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Não foi possível carregar mais fornecedores.', 'error');
+    } finally {
+      setSupplierOptionsLoadingMore(false);
+    }
+  };
 
   const counts = useMemo(() => {
-    const base = { all: state.items.length, normal: 0, attention: 0, critical: 0, empty: 0 };
+    const base = { all: state.items.length, normal: 0, near_minimum: 0, attention: 0, critical: 0, empty: 0 };
     for (const item of state.items) base[itemStatus(item)] += 1;
     return base;
   }, [state.items]);
+  const inventoryCounts = mode === 'production' && remoteInsights ? {
+    all: remoteInsights.total,
+    normal: remoteInsights.normal,
+    near_minimum: remoteInsights.near_minimum,
+    attention: remoteInsights.attention,
+    critical: remoteInsights.critical,
+    empty: remoteInsights.empty,
+  } : mode === 'production' ? {
+    all: null, normal: null, near_minimum: null, attention: null, critical: null, empty: null,
+  } : counts;
+  const inventoryTotal = mode === 'production' ? remoteInsights?.total ?? null : state.items.length;
+  const inventoryValue = mode === 'production'
+    ? remoteInsights?.known_stock_value_cents ?? null
+    : stockValueCents(state);
+  const inventoryWithoutCost = mode === 'production'
+    ? remoteInsights?.without_cost ?? null
+    : itemsWithoutCost(state).length;
+  const attentionCount = inventoryCounts.all != null && inventoryCounts.normal != null
+    ? inventoryCounts.all - inventoryCounts.normal : null;
 
   const filtered = useMemo(() => {
+    if (mode === 'production') return [];
     const term = search.trim().toLowerCase();
     const list = state.items.filter((item) => {
       if (category !== 'all' && item.category !== category) return false;
@@ -49,6 +149,8 @@ export function InventoryPage() {
     });
     return list.sort((a, b) => {
       switch (sort) {
+        case 'priority':
+          return compareReplenishmentPriority(a, b);
         case 'value':
           return itemValueCents(b) - itemValueCents(a);
         case 'qty':
@@ -61,7 +163,106 @@ export function InventoryPage() {
           return a.name.localeCompare(b.name, 'pt-BR');
       }
     });
-  }, [state.items, state.suppliers, search, category, status, sort]);
+  }, [mode, state.items, state.suppliers, search, category, status, sort]);
+
+  useEffect(() => {
+    const generation = ++requestGeneration.current;
+    setRemoteItems([]);
+    setRemoteHasMore(false);
+    setRemoteFilteredTotal(null);
+    setRemoteFilteredSummary(null);
+    setRemoteError(null);
+    setRemoteLoadingMore(false);
+    setClientVisibleCount(PAGE_SIZE);
+    if (mode !== 'production' || !ready || !state.restaurant.id) {
+      setRemoteLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setRemoteLoading(true);
+    const query = {
+      search,
+      category: category === 'all' ? null : category,
+      status: status === 'all' ? null : status,
+      sort: sort === 'qty' ? 'quantity_asc' as const
+        : sort === 'updated' ? 'updated_desc' as const
+          : sort === 'cost' ? 'cost_desc' as const
+            : sort === 'value' ? 'value_desc' as const
+              : sort,
+    };
+    const timerId = window.setTimeout(() => {
+      void fetchApiInventoryPage(query, 0, PAGE_SIZE, false, true)
+        .then((page) => {
+          if (cancelled || generation !== requestGeneration.current) return;
+          setRemoteItems(page.items);
+          actionsRef.current.cacheIngredients(page.items);
+          void fetchApiSuppliersByIds(page.items.map((item) => item.primarySupplierId ?? ''))
+            .then((suppliers) => actionsRef.current.cacheSuppliers(suppliers)).catch(() => undefined);
+          setRemoteHasMore(page.hasMore);
+          setRemoteFilteredTotal(page.total ?? page.items.length);
+          setRemoteFilteredSummary(page.summary ?? null);
+        })
+        .catch((error: unknown) => {
+          if (cancelled || generation !== requestGeneration.current) return;
+          setRemoteError(error instanceof Error ? error.message : 'Não foi possível carregar o estoque.');
+        })
+        .finally(() => {
+          if (!cancelled && generation === requestGeneration.current) setRemoteLoading(false);
+        });
+    }, search.trim() ? 250 : 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timerId);
+    };
+  }, [mode, ready, state.restaurant.id, search, category, status, sort, queryRetry]);
+
+  const visibleItems = mode === 'production' ? remoteItems : filtered.slice(0, clientVisibleCount);
+  const hasMoreItems = mode === 'production' ? remoteHasMore : visibleItems.length < filtered.length;
+  const filteredTotal = mode === 'production' ? remoteFilteredTotal ?? remoteItems.length : filtered.length;
+  const filteredValue = mode === 'production' ? remoteFilteredSummary?.known_stock_value_cents
+    : filtered.filter(itemCostKnown).reduce((sum, item) => sum + itemValueCents(item), 0);
+  const filteredWithoutCost = mode === 'production' ? remoteFilteredSummary?.without_cost
+    : filtered.filter((item) => !itemCostKnown(item)).length;
+  const loadMore = async () => {
+    if (mode !== 'production') {
+      setClientVisibleCount((current) => current + PAGE_SIZE);
+      return;
+    }
+    if (remoteLoading || remoteLoadingMore || !remoteHasMore) return;
+    const generation = requestGeneration.current;
+    setRemoteLoadingMore(true);
+    setRemoteError(null);
+    const query = {
+      search,
+      category: category === 'all' ? null : category,
+      status: status === 'all' ? null : status,
+      sort: sort === 'qty' ? 'quantity_asc' as const
+        : sort === 'updated' ? 'updated_desc' as const
+          : sort === 'cost' ? 'cost_desc' as const
+            : sort === 'value' ? 'value_desc' as const
+              : sort,
+    };
+    try {
+      const page = await fetchApiInventoryPage(query, remoteItems.length, PAGE_SIZE);
+      if (generation !== requestGeneration.current) return;
+      actionsRef.current.cacheIngredients(page.items);
+      void fetchApiSuppliersByIds(page.items.map((item) => item.primarySupplierId ?? ''))
+        .then((suppliers) => actionsRef.current.cacheSuppliers(suppliers)).catch(() => undefined);
+      setRemoteItems((previous) => {
+        const known = new Set(previous.map((item) => item.id));
+        return [...previous, ...page.items.filter((item) => !known.has(item.id))];
+      });
+      setRemoteHasMore(page.hasMore);
+    } catch (error) {
+      if (generation === requestGeneration.current) {
+        setRemoteError(error instanceof Error ? error.message : 'Não foi possível carregar mais insumos.');
+      }
+    } finally {
+      if (generation === requestGeneration.current) setRemoteLoadingMore(false);
+    }
+  };
 
   const resetForm = () => {
     setName('');
@@ -71,21 +272,33 @@ export function InventoryPage() {
     setCost('');
     setInitialQty('0');
     setSupplierId('');
+    setConversions([]);
   };
 
   const submit = async () => {
+    const conversionMap = parseConversionDrafts(conversions);
+    if (!conversionMap) return;
+    const parsedCost = parseOptionalNonNegativeMoney(cost);
+    if (!parsedCost) {
+      notify('Informe um custo válido, igual ou maior que zero.', 'error');
+      return;
+    }
     const id = await actions.createItem({
       name,
       category: newCategory,
       unit,
       minQty: parseQty(minQty),
-      costCents: parseMoney(cost),
+      costCents: parsedCost.cents,
+      costKnown: parsedCost.known,
       initialQty: parseQty(initialQty),
       supplierId: supplierId || null,
+      conversions: conversionMap,
     });
     if (id) {
       setDrawerOpen(false);
       resetForm();
+      setInsightRetry((value) => value + 1);
+      setQueryRetry((value) => value + 1);
     }
   };
 
@@ -98,15 +311,20 @@ export function InventoryPage() {
         meta={
           <>
             <span className="text-[11px] text-muted">
-              <span className="num text-cream">{state.items.length}</span> insumos
+              <span className="num text-cream">{inventoryTotal ?? (insightsLoading ? '…' : '—')}</span> insumos
             </span>
             <span className="text-[11px] text-dim">·</span>
             <span className="text-[11px] text-muted">
-              Valor total <span className="num text-cream">{money(stockValueCents(state))}</span>
+              Valor conhecido <span className="num text-cream">{inventoryValue == null
+                ? insightsLoading ? '…' : '—' : money(inventoryValue)}</span>
             </span>
+            {inventoryWithoutCost != null && inventoryWithoutCost > 0
+              ? <><span className="text-[11px] text-dim">·</span><span className="text-[11px] text-warn">{inventoryWithoutCost} sem custo</span></> : null}
+            {insightsFailed ? <button type="button" className="text-[10px] text-copper hover:text-cream"
+              onClick={() => setInsightRetry((value) => value + 1)}>Atualizar indicadores</button> : null}
             <span className="text-[11px] text-dim">·</span>
             <span className="text-[11px] text-muted">
-              <span className="num text-copper">{counts.all - counts.normal}</span> exigem atenção
+              <span className="num text-copper">{attentionCount ?? (insightsLoading ? '…' : '—')}</span> exigem atenção
             </span>
           </>
         }
@@ -162,6 +380,7 @@ export function InventoryPage() {
               aria-label="Ordenar"
             >
               <option value="name">Nome (A–Z)</option>
+              <option value="priority">Prioridade de reposição</option>
               <option value="value">Maior valor em estoque</option>
               <option value="qty">Menor saldo</option>
               <option value="cost">Maior custo unitário</option>
@@ -176,34 +395,52 @@ export function InventoryPage() {
             onClick={() => setStatus('all')}
             className={`filter-tab ${status === 'all' ? 'filter-tab-active' : ''}`}
           >
-            Todos <span className="font-mono text-[10px] text-dim">{counts.all}</span>
+            Todos <span className="font-mono text-[10px] text-dim">{inventoryCounts.all ?? (insightsLoading ? '…' : '—')}</span>
           </button>
           <button type="button" onClick={() => setStatus('needs-attention')} className={`filter-tab ${status === 'needs-attention' ? 'filter-tab-active' : ''}`}>
-            Atenção <span className="font-mono text-[10px] text-dim">{counts.all - counts.normal}</span>
+            Atenção <span className="font-mono text-[10px] text-dim">{attentionCount ?? (insightsLoading ? '…' : '—')}</span>
           </button>
           <details className="relative">
             <summary className="filter-tab cursor-pointer">Filtrar estado</summary>
             <div className="absolute left-0 top-full z-10 mt-1 min-w-[180px] border border-line bg-panel p-1">
               {STATUS_ORDER.map((key) => (
                 <button key={key} type="button" onClick={() => setStatus(key)} className={`flex w-full items-center justify-between px-2.5 py-2 text-left text-[11px] ${status === key ? 'bg-raised text-cream' : 'text-muted hover:bg-raised'}`}>
-                  {STATUS_LABEL[key]} <span className="font-mono text-[10px] text-dim">{counts[key]}</span>
+                  {STATUS_LABEL[key]} <span className="font-mono text-[10px] text-dim">{inventoryCounts[key] ?? (insightsLoading ? '…' : '—')}</span>
                 </button>
               ))}
             </div>
           </details>
         </div>
 
-        {filtered.length === 0 ? (
+        {mode === 'production' && remoteLoading && remoteItems.length === 0 ? (
+          <div className="px-4 py-10 text-center text-[12px] text-dim" role="status">Carregando insumos…</div>
+        ) : mode === 'production' && remoteError && remoteItems.length === 0 ? (
           <EmptyState
             icon={<Boxes size={18} />}
-            title={state.items.length === 0 ? 'Ainda não há insumos cadastrados' : 'Nenhum insumo encontrado'}
+            title="Não foi possível carregar o estoque"
+            description={remoteError}
+            action={<button type="button" className="btn btn-ghost" onClick={() => setQueryRetry((value) => value + 1)}>Tentar novamente</button>}
+          />
+        ) : visibleItems.length === 0 ? (
+          <EmptyState
+            icon={<Boxes size={18} />}
+            title={mode === 'production'
+              ? remoteFilteredTotal === 0 && !search.trim() && category === 'all' && status === 'all'
+                ? 'Ainda não há insumos cadastrados' : 'Nenhum insumo encontrado'
+              : inventoryTotal === 0 ? 'Ainda não há insumos cadastrados' : 'Nenhum insumo encontrado'}
             description={
-              state.items.length === 0
+              mode === 'production'
+                ? remoteFilteredTotal === 0 && !search.trim() && category === 'all' && status === 'all'
+                  ? 'Cadastre o primeiro insumo para acompanhar saldo, custo e consumo.'
+                  : 'Ajuste a busca ou limpe os filtros para ver outros itens do estoque.'
+                : inventoryTotal === 0
                 ? 'Cadastre o primeiro insumo para acompanhar saldo, custo e consumo.'
                 : 'Ajuste a busca ou limpe os filtros para ver outros itens do estoque.'
             }
             action={
-              state.items.length === 0 && can('stock.create') ? (
+              (mode === 'production'
+                ? remoteFilteredTotal === 0 && !search.trim() && category === 'all' && status === 'all'
+                : inventoryTotal === 0) && can('stock.create') ? (
                 <button type="button" className="btn btn-primary" onClick={() => setDrawerOpen(true)}>
                   <Plus size={14} />
                   Cadastrar insumo
@@ -225,6 +462,7 @@ export function InventoryPage() {
           />
         ) : (
           <>
+            {remoteError ? <div className="border-b border-warn/30 bg-warn/5 px-4 py-2 text-[11px] text-warn" role="status">{remoteError}</div> : null}
             <div className="scroll-x hidden md:block">
               <table className="table min-w-[520px]">
                 <thead>
@@ -235,7 +473,7 @@ export function InventoryPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((item) => {
+                  {visibleItems.map((item) => {
                     return (
                       <tr key={item.id} className="row-link">
                         <td>
@@ -243,6 +481,7 @@ export function InventoryPage() {
                             <div className="text-[13px] text-cream">{item.name}</div>
                             <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10.5px] text-dim">
                               {item.category}
+                              {itemStatus(item) === 'near_minimum' ? <span className="text-copper">· Próximo do mínimo ({fmtQty(item.minQty, item.unit)})</span> : null}
                               {itemStatus(item) === 'attention' ? <span className="text-warn">· Abaixo do mínimo ({fmtQty(item.minQty, item.unit)})</span> : null}
                               {itemStatus(item) === 'critical' ? <span className="text-danger">· Crítico · mín. {fmtQty(item.minQty, item.unit)}</span> : null}
                               {itemStatus(item) === 'empty' ? <span className="text-danger">· Sem estoque · mín. {fmtQty(item.minQty, item.unit)}</span> : null}
@@ -265,7 +504,7 @@ export function InventoryPage() {
             </div>
 
             <div className="divide-y divide-line md:hidden">
-              {filtered.map((item) => (
+              {visibleItems.map((item) => (
                 <Link
                   key={item.id}
                   to={`/estoque/${item.id}`}
@@ -291,11 +530,16 @@ export function InventoryPage() {
 
             <div className="flex flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-2.5 text-[10.5px] text-dim">
               <span>
-                {filtered.length} de {state.items.length} insumos
+                {visibleItems.length} exibidos de {filteredTotal} filtrados · {inventoryTotal} no estoque
               </span>
               <span className="num">
-                {money(filtered.reduce((sum, item) => sum + itemValueCents(item), 0))} no filtro atual
+                Valor conhecido: {mode === 'production' && filteredValue == null
+                  ? remoteLoading ? '…' : '—' : money(filteredValue ?? 0)}
+                {(filteredWithoutCost ?? 0) > 0 ? ` · ${filteredWithoutCost} sem custo` : ''}
               </span>
+              {hasMoreItems ? <button type="button" className="btn btn-ghost h-7 px-2 text-[10px]" onClick={() => void loadMore()} disabled={remoteLoadingMore || remoteLoading}>
+                {remoteLoadingMore ? 'Carregando…' : 'Carregar mais'}
+              </button> : null}
             </div>
           </>
         )}
@@ -312,7 +556,7 @@ export function InventoryPage() {
             <button type="button" className="btn btn-ghost" onClick={() => setDrawerOpen(false)}>
               Cancelar
             </button>
-            <button type="button" className="btn btn-primary" onClick={submit}>
+            <button type="button" className="btn btn-primary" onClick={submit} disabled={!name.trim() || parsedConversions === null}>
               Cadastrar insumo
             </button>
           </>
@@ -360,6 +604,7 @@ export function InventoryPage() {
               </select>
             </Field>
           </div>
+          <ConversionEditor baseUnit={unit} value={conversions} onChange={setConversions} />
           <div className="grid grid-cols-2 gap-3">
             <Field label="Estoque mínimo" htmlFor="item-min" hint="Abaixo deste saldo o item entra em atenção.">
               <input
@@ -403,16 +648,24 @@ export function InventoryPage() {
                 id="item-supplier"
                 className="select"
                 value={supplierId}
-                onChange={(event) => setSupplierId(event.target.value)}
+                onChange={(event) => {
+                  const nextId = event.target.value;
+                  setSupplierId(nextId);
+                  const selected = supplierOptions.find((supplier) => supplier.id === nextId);
+                  if (selected) actions.cacheSupplier(selected);
+                }}
               >
                 <option value="">Sem fornecedor</option>
-                {state.suppliers.map((supplier) => (
+                {supplierOptions.filter((supplier) => supplier.active !== false).map((supplier) => (
                   <option key={supplier.id} value={supplier.id}>
                     {supplier.name}
                   </option>
                 ))}
               </select>
             </Field>
+            {mode === 'production' && supplierOptionsHasMore ? <button type="button"
+              className="text-left text-[10.5px] text-copper hover:text-cream" disabled={supplierOptionsLoadingMore}
+              onClick={loadMoreSuppliers}>{supplierOptionsLoadingMore ? 'Carregando fornecedores…' : 'Carregar mais fornecedores'}</button> : null}
           </div>
           <div className="border border-line bg-[#0b0b0a] px-3 py-2.5 text-[11px] leading-relaxed text-dim">
             O estoque não é um número editável: alterações futuras geram movimentações com motivo,

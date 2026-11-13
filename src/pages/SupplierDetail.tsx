@@ -1,16 +1,23 @@
+import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowRight, Info, Truck } from 'lucide-react';
 import { useApp } from '../state/AppStore';
+import { useEnsureIngredients } from '../hooks/useEnsureIngredients';
 import {
   purchaseTotalCents,
   supplierItemCount,
   supplierLastPurchase,
+  supplierReceiptInsight,
   supplierRecentValue,
 } from '../domain/selectors';
-import { date, money, qty as fmtQty, shortDate } from '../domain/format';
+import type { Purchase, Supplier } from '../domain/types';
+import { fetchApiInventoryPage, fetchApiPurchasePage, fetchApiSupplier } from '../lib/api';
+import { date, money, moneyInput, parseMoney, parseQty, qty as fmtQty, shortDate } from '../domain/format';
 import {
   BackLink,
+  Drawer,
   EmptyState,
+  Field,
   PageHeader,
   Panel,
   PurchaseStatusTag,
@@ -18,15 +25,93 @@ import {
 
 export function SupplierDetailPage() {
   const { id } = useParams();
-  const { state, can } = useApp();
-  const supplier = state.suppliers.find((s) => s.id === id);
+  const { state, actions, can, mode } = useApp();
+  const [purchaseRows, setPurchaseRows] = useState<Purchase[]>([]);
+  const [purchaseHasMore, setPurchaseHasMore] = useState(false);
+  const [purchaseLoading, setPurchaseLoading] = useState(false);
+  const [purchaseError, setPurchaseError] = useState<string | null>(null);
+  const [primarySupplierItems, setPrimarySupplierItems] = useState<typeof state.items>([]);
+  const [primaryItemsLoading, setPrimaryItemsLoading] = useState(false);
+  const [primaryItemsError, setPrimaryItemsError] = useState<string | null>(null);
+  const [resolvedSupplier, setResolvedSupplier] = useState<Supplier | null>(null);
+  const [supplierLookup, setSupplierLookup] = useState<{ id: string | undefined; loading: boolean }>({
+    id: undefined, loading: false,
+  });
+  const supplierRequestRef = useRef<string | null>(null);
+  const [editOpen, setEditOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [contact, setContact] = useState('');
+  const [phone, setPhone] = useState('');
+  const [whatsapp, setWhatsapp] = useState('');
+  const [notes, setNotes] = useState('');
+  const [leadTime, setLeadTime] = useState('');
+  const [minimum, setMinimum] = useState('');
+  const [active, setActive] = useState(true);
+  const supplier = state.suppliers.find((s) => s.id === id) ?? resolvedSupplier;
+  const supplied = state.supplierItems.filter((si) => si.supplierId === id);
+  const ingredientHydration = useEnsureIngredients(supplied.map((offer) => offer.itemId));
+
+  useEffect(() => {
+    if (mode !== 'production' || !id || supplierRequestRef.current === id) return;
+    supplierRequestRef.current = id;
+    let active = true;
+    setResolvedSupplier(null);
+    setSupplierLookup({ id, loading: true });
+    void fetchApiSupplier(id).then((loaded) => {
+      if (active) { setResolvedSupplier(loaded); actions.cacheSupplier(loaded); }
+    }).catch(() => { /* The not-found state is shown after lookup completes. */ })
+      .finally(() => { if (active) setSupplierLookup({ id, loading: false }); });
+    return () => { active = false; };
+  }, [mode, id, actions]);
+
+  useEffect(() => {
+    if (mode !== 'production' || !id) return;
+    let active = true;
+    setPurchaseRows([]); setPurchaseLoading(true); setPurchaseError(null);
+    void fetchApiPurchasePage('all', 0, 50, id).then((page) => {
+      if (active) { setPurchaseRows(page.purchases); setPurchaseHasMore(page.hasMore); }
+    }).catch((error: unknown) => {
+      if (active) setPurchaseError(error instanceof Error ? error.message : 'Não foi possível carregar o histórico.');
+    }).finally(() => { if (active) setPurchaseLoading(false); });
+    return () => { active = false; };
+  }, [mode, id]);
+
+  useEffect(() => {
+    if (mode !== 'production' || !id) return;
+    let active = true;
+    setPrimarySupplierItems([]);
+    setPrimaryItemsLoading(true);
+    setPrimaryItemsError(null);
+    void (async () => {
+      const items: typeof state.items = [];
+      let offset = 0;
+      let hasMore = true;
+      while (hasMore) {
+        const page = await fetchApiInventoryPage({ search: '', category: null, status: null,
+          sort: 'name', supplierId: id }, offset, 100);
+        items.push(...page.items);
+        hasMore = page.hasMore;
+        offset += page.items.length;
+      }
+      if (active) {
+        setPrimarySupplierItems(items);
+      }
+    })().catch((error: unknown) => {
+      if (active) setPrimaryItemsError(error instanceof Error
+        ? error.message : 'Não foi possível carregar os insumos vinculados.');
+    }).finally(() => { if (active) setPrimaryItemsLoading(false); });
+    return () => { active = false; };
+  }, [mode, id]);
 
   if (!supplier) {
+    const lookupPending = mode === 'production'
+      && (supplierLookup.id !== id || supplierLookup.loading);
     return (
       <div>
         <BackLink to="/fornecedores">Fornecedores</BackLink>
         <Panel>
-          <EmptyState
+          {lookupPending ? <div className="p-5 text-sm text-dim" role="status">Carregando fornecedor…</div> : null}
+          {!lookupPending ? <EmptyState
             icon={<Info size={18} />}
             title="Fornecedor não encontrado"
             description="O cadastro pode ter sido removido ou o endereço está incorreto."
@@ -35,22 +120,62 @@ export function SupplierDetailPage() {
                 Voltar para fornecedores
               </Link>
             }
-          />
+          /> : null}
         </Panel>
       </div>
     );
   }
 
-  const supplied = state.supplierItems.filter((si) => si.supplierId === supplier.id);
-  const purchases = state.purchases
+  if (ingredientHydration.loading) {
+    return <div><BackLink to="/fornecedores">Fornecedores</BackLink><Panel><div className="px-5 py-8 text-center text-[12px] text-dim" role="status">Carregando insumos deste fornecedor…</div></Panel></div>;
+  }
+  if (ingredientHydration.error) {
+    return <div><BackLink to="/fornecedores">Fornecedores</BackLink><Panel><EmptyState icon={<Info size={18} />}
+      title="Não foi possível carregar os insumos" description={ingredientHydration.error}
+      action={<button type="button" className="btn btn-ghost" onClick={ingredientHydration.retry}>Tentar novamente</button>} /></Panel></div>;
+  }
+
+  const purchases = mode === 'production' ? purchaseRows : state.purchases
     .filter((purchase) => purchase.supplierId === supplier.id)
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const last = supplierLastPurchase(state, supplier.id);
+  const receipt = supplierReceiptInsight(state, supplier.id);
   const recent = supplierRecentValue(state, supplier.id);
 
-  const rows = supplied
+  const openEdit = () => {
+    setName(supplier.name);
+    setContact(supplier.contact);
+    setPhone(supplier.phone);
+    setWhatsapp(supplier.whatsapp);
+    setNotes(supplier.notes);
+    setLeadTime(String(supplier.avgLeadTimeDays));
+    setMinimum(moneyInput(supplier.minOrderCents));
+    setActive(supplier.active !== false);
+    setEditOpen(true);
+  };
+
+  const save = async () => {
+    const saved = await actions.updateSupplier(supplier.id, {
+      name: name.trim(), contact: contact.trim(), phone: phone.trim(), whatsapp: whatsapp.trim(),
+      notes: notes.trim(), avgLeadTimeDays: Math.max(0, Math.round(parseQty(leadTime))),
+      minOrderCents: parseMoney(minimum), active,
+    });
+    if (saved) setEditOpen(false);
+  };
+
+  const suppliedByItem = new Map(supplied.map((offer) => [offer.itemId, offer]));
+  for (const item of primarySupplierItems) {
+    if (!suppliedByItem.has(item.id)) suppliedByItem.set(item.id, {
+      id: `primary:${supplier.id}:${item.id}`, restaurantId: item.restaurantId,
+      supplierId: supplier.id, itemId: item.id, lastPriceCents: 0,
+      lastPurchaseAt: null, leadTimeDays: supplier.avgLeadTimeDays,
+      minOrderCents: supplier.minOrderCents,
+    });
+  }
+  const rows = [...suppliedByItem.values()]
     .map((si) => {
-      const item = state.items.find((i) => i.id === si.itemId);
+      const item = state.items.find((i) => i.id === si.itemId)
+        ?? primarySupplierItems.find((i) => i.id === si.itemId);
       if (!item) return null;
       const points = state.pricePoints
         .filter((p) => p.itemId === item.id && p.supplierId === supplier.id)
@@ -83,12 +208,15 @@ export function SupplierDetailPage() {
           </span>
         }
         actions={
-          can('purchases.manage') ? (
-            <Link to="/compras?novo=1" className="btn btn-ghost">
-              <Truck size={14} />
-              Novo pedido
-            </Link>
-          ) : null
+          <>
+            {can('suppliers.manage') ? <button type="button" className="btn btn-ghost" onClick={openEdit}>Editar cadastro</button> : null}
+            {can('purchases.manage') && supplier.active !== false ? (
+              <Link to="/compras?novo=1" className="btn btn-ghost">
+                <Truck size={14} />
+                Novo pedido
+              </Link>
+            ) : null}
+          </>
         }
       />
 
@@ -101,14 +229,14 @@ export function SupplierDetailPage() {
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Comprado (90 dias)</div>
           <div className="mt-2 num text-[20px] text-cream">{money(recent)}</div>
-          <div className="mt-1.5 text-[10.5px] text-dim">{purchases.length} pedidos registrados</div>
+          <div className="mt-1.5 text-[10.5px] text-dim">{state.supplierPurchaseInsights?.[supplier.id]?.orderCount ?? purchases.length} pedidos registrados</div>
         </div>
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Última entrega</div>
           <div className="mt-2 text-[15px] text-cream">
-            {last?.receivedAt ? date(last.receivedAt) : 'sem entrega'}
+            {receipt?.receivedAt ? date(receipt.receivedAt) : 'sem entrega'}
           </div>
-          <div className="mt-1.5 text-[10.5px] text-dim">{last?.code ?? '—'}</div>
+          <div className="mt-1.5 text-[10.5px] text-dim">{receipt?.purchaseCode ?? last?.purchase.code ?? '—'}</div>
         </div>
         <div className="bg-panel px-4 py-4">
           <div className="eyebrow">Prazo médio</div>
@@ -127,7 +255,9 @@ export function SupplierDetailPage() {
             flush
             bodyClassName=""
           >
-            {rows.length === 0 ? (
+            {primaryItemsLoading ? <div className="p-5 text-sm text-dim" role="status">Carregando itens vinculados…</div> : null}
+            {primaryItemsError ? <div className="p-5 text-sm text-copper">{primaryItemsError}</div> : null}
+            {!primaryItemsLoading && rows.length === 0 ? (
               <EmptyState
                 icon={<Truck size={18} />}
                 title="Nenhum item vinculado a este fornecedor"
@@ -138,7 +268,7 @@ export function SupplierDetailPage() {
                   </Link>
                 }
               />
-            ) : (
+            ) : rows.length > 0 ? (
               <div className="scroll-x">
                 <table className="table min-w-[680px]">
                   <thead>
@@ -164,8 +294,8 @@ export function SupplierDetailPage() {
                           </Link>
                         </td>
                         <td className="text-right num text-[12px] text-cream">
-                          {money(latest?.unitCostCents ?? si.lastPriceCents)}
-                          <span className="ml-0.5 text-[10px] text-dim">/{item.unit}</span>
+                          {latest ? money(latest.unitCostCents) : si.lastPurchaseAt ? money(si.lastPriceCents) : '—'}
+                          {latest || si.lastPurchaseAt ? <span className="ml-0.5 text-[10px] text-dim">/{item.unit}</span> : null}
                         </td>
                         <td
                           className={`text-right num text-[11px] ${
@@ -191,7 +321,7 @@ export function SupplierDetailPage() {
                   </tbody>
                 </table>
               </div>
-            )}
+            ) : null}
           </Panel>
 
           <Panel
@@ -200,7 +330,9 @@ export function SupplierDetailPage() {
             flush
             bodyClassName=""
           >
-            {purchases.length === 0 ? (
+            {purchaseLoading && purchases.length === 0 ? <div className="p-5 text-sm text-dim">Carregando histórico…</div> : null}
+            {purchaseError ? <div className="p-5 text-sm text-copper">{purchaseError}</div> : null}
+            {!purchaseLoading && !purchaseError && purchases.length === 0 ? (
               <EmptyState
                 icon={<Truck size={18} />}
                 title="Nenhuma compra registrada"
@@ -258,6 +390,13 @@ export function SupplierDetailPage() {
                 </table>
               </div>
             )}
+            {purchaseHasMore ? <div className="border-t border-line p-3 text-center"><button type="button" className="btn btn-ghost" disabled={purchaseLoading} onClick={() => {
+              setPurchaseLoading(true); setPurchaseError(null);
+              void fetchApiPurchasePage('all', purchaseRows.length, 50, supplier.id).then((page) => {
+                setPurchaseRows((previous) => [...previous, ...page.purchases]); setPurchaseHasMore(page.hasMore);
+              }).catch((error: unknown) => setPurchaseError(error instanceof Error ? error.message : 'Não foi possível carregar o histórico.'))
+                .finally(() => setPurchaseLoading(false));
+            }}>{purchaseLoading ? 'Carregando…' : 'Carregar mais compras'}</button></div> : null}
           </Panel>
         </div>
 
@@ -327,6 +466,34 @@ export function SupplierDetailPage() {
           </div>
         </div>
       </div>
+      <Drawer
+        open={editOpen}
+        onClose={() => setEditOpen(false)}
+        eyebrow="Fornecedores / Cadastro"
+        title="Editar fornecedor"
+        description="Desativar preserva o histórico de compras e impede novos pedidos."
+        footer={<>
+          <button type="button" className="btn btn-ghost" onClick={() => setEditOpen(false)}>Cancelar</button>
+          <button type="button" className="btn btn-primary" onClick={save} disabled={!name.trim()}>Salvar alterações</button>
+        </>}
+      >
+        <div className="space-y-4">
+          <Field label="Nome" htmlFor="edit-supplier-name"><input id="edit-supplier-name" className="input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+          <Field label="Contato" htmlFor="edit-supplier-contact"><input id="edit-supplier-contact" className="input" value={contact} onChange={(e) => setContact(e.target.value)} /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Telefone" htmlFor="edit-supplier-phone"><input id="edit-supplier-phone" className="input" value={phone} onChange={(e) => setPhone(e.target.value)} /></Field>
+            <Field label="WhatsApp" htmlFor="edit-supplier-whatsapp"><input id="edit-supplier-whatsapp" className="input" value={whatsapp} onChange={(e) => setWhatsapp(e.target.value)} /></Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Prazo médio (dias)" htmlFor="edit-supplier-lead"><input id="edit-supplier-lead" className="input num" inputMode="numeric" value={leadTime} onChange={(e) => setLeadTime(e.target.value)} /></Field>
+            <Field label="Pedido mínimo" htmlFor="edit-supplier-min"><input id="edit-supplier-min" className="input num" inputMode="decimal" value={minimum} onChange={(e) => setMinimum(e.target.value)} /></Field>
+          </div>
+          <Field label="Observações" htmlFor="edit-supplier-notes"><textarea id="edit-supplier-notes" className="input min-h-20 resize-y" value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
+          <label className="flex items-center gap-2 border border-line bg-[#0b0b0a] px-3 py-2.5 text-[12px] text-muted">
+            <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} /> Fornecedor ativo
+          </label>
+        </div>
+      </Drawer>
     </div>
   );
 }
