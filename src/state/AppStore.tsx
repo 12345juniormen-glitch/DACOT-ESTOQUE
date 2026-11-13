@@ -124,7 +124,7 @@ interface AppContextValue {
     createPurchase: (input: NewPurchaseInput) => string | null | Promise<string | null>;
     cachePurchase: (purchase: Purchase) => void;
     updatePurchase: (purchaseId: string, input: NewPurchaseInput) => boolean | Promise<boolean>;
-    createRecipe: (input: { name: string; salePriceCents: Cents; itemId: string; qty: number; unit: Unit; yieldPortions: number }) => string | null | Promise<string | null>;
+    createRecipe: (input: { name: string; salePriceCents: Cents; itemId: string; qty: number; unit: Unit; yieldPortions: number; productId?: string }) => string | null | Promise<string | null>;
     requestPurchase: (purchaseId: string, expectedVersion: number) => boolean | Promise<boolean>;
     cancelPurchase: (purchaseId: string, expectedVersion: number) => boolean | Promise<boolean>;
     receivePurchase: (purchaseId: string, receipts: ReceiveLineInput[]) => boolean | Promise<boolean>;
@@ -1652,7 +1652,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return id;
       },
 
-      createRecipe: (input: { name: string; salePriceCents: Cents; itemId: string; qty: number; unit: Unit; yieldPortions: number }) => {
+      createRecipe: (input: { name: string; salePriceCents: Cents; itemId: string; qty: number; unit: Unit; yieldPortions: number; productId?: string }) => {
         if (!require('recipes.manage')) return null;
         const name = input.name.trim();
         const item = state.items.find((entry) => entry.id === input.itemId && entry.active !== false);
@@ -1662,9 +1662,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
         const slug = name.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
           .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 100) || 'produto';
-        const productId = `manual-${slug}`;
+        const productId = input.productId?.trim() || `manual-${slug}`;
         if (state.recipes.some((recipe) => recipe.id === productId
-          || recipe.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+          || (!input.productId && recipe.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase()))) {
           notify('Já existe uma ficha com esse nome ou identificador neste restaurante.', 'error');
           return null;
         }

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ClipboardList,
   LayoutDashboard,
+  Link2,
   LogOut,
   Menu,
   ShoppingCart,
@@ -117,16 +118,12 @@ function NavContent({ onNavigate }: { onNavigate?: () => void }) {
 
         <div className="mt-2 border-t border-line/70 pt-4">
           <div className="eyebrow px-5 pb-2">Integrações</div>
-          <div className="space-y-2.5 px-5">
-            <div className="flex items-start gap-2.5">
-              <span className="mt-1.5 h-1.5 w-1.5 shrink-0 bg-ok" />
-              <div className="min-w-0">
-                <div className="text-[12px] text-muted">DACOT Pedidos</div>
-                <div className="mt-0.5 text-[10.5px] leading-relaxed text-dim">
-                  Consumo por ORDER_DELIVERED
-                </div>
-              </div>
-            </div>
+          <div className="space-y-2.5 px-3">
+            {can('recipes.view') ? <NavLink to="/integracao-pedidos" onClick={onNavigate}
+              className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`}>
+              <Link2 size={15} strokeWidth={1.6} />
+              <span className="flex-1">DACOT Pedidos</span>
+            </NavLink> : null}
             <div className="flex items-start gap-2.5">
               <span className="mt-1.5 h-1.5 w-1.5 shrink-0 border border-line-strong" />
               <div className="min-w-0">

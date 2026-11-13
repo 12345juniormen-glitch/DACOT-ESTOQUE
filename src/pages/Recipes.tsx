@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowRight, BookOpen, Plus } from 'lucide-react';
 import { useApp } from '../state/AppStore';
 import { recipeCostPerPortionCents, recipeMargin, recipeMarginCalculable } from '../domain/selectors';
@@ -14,8 +14,10 @@ const RECIPE_PAGE_SIZE = 50;
 export function RecipesPage() {
   const { state, actions, can, mode, ready } = useApp();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState('');
+  const [linkedProductId, setLinkedProductId] = useState('');
   const [salePrice, setSalePrice] = useState('');
   const [itemId, setItemId] = useState('');
   const [quantity, setQuantity] = useState('');
@@ -35,6 +37,14 @@ export function RecipesPage() {
   const generationRef = useRef(0);
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+
+  useEffect(() => {
+    const productId = searchParams.get('productId')?.trim();
+    if (!productId) return;
+    setLinkedProductId(productId);
+    setName(searchParams.get('productName')?.trim() || productId);
+    setCreateOpen(true);
+  }, [searchParams]);
 
   const loadRecipePage = async (offset: number) => {
     const page = await fetchApiRecipePage(offset, RECIPE_PAGE_SIZE);
@@ -138,10 +148,11 @@ export function RecipesPage() {
     const recipeQuantity = parseStockQty(quantity);
     if (!recipeQuantity || !Number.isInteger(portions) || portions < 1 || portions > 10000) return;
     const id = await actions.createRecipe({ name, salePriceCents: parseMoney(salePrice),
-      itemId, qty: recipeQuantity, unit, yieldPortions: portions });
+      itemId, qty: recipeQuantity, unit, yieldPortions: portions,
+      ...(linkedProductId ? { productId: linkedProductId } : {}) });
     if (!id) return;
     setCreateOpen(false);
-    setName(''); setSalePrice(''); setItemId(''); setQuantity(''); setYieldPortions('1');
+    setName(''); setLinkedProductId(''); setSalePrice(''); setItemId(''); setQuantity(''); setYieldPortions('1');
     navigate(`/fichas/${id}`);
   };
 
@@ -150,7 +161,7 @@ export function RecipesPage() {
       <PageHeader
         eyebrow="06 / Fichas Técnicas"
         title="Fichas técnicas"
-        description="Registre a composição e acompanhe o custo atual de cada produto. A baixa automática por vendas ainda depende da integração com Pedidos."
+        description="Registre a composição, acompanhe o custo e valide quais produtos podem orientar o consumo automático de vendas do DACOT Pedidos."
         actions={can('recipes.manage') ? <button type="button" className="btn btn-primary" onClick={() => setCreateOpen(true)}><Plus size={14} />Nova ficha</button> : null}
         meta={
           <>
@@ -293,6 +304,7 @@ export function RecipesPage() {
       >
         <div className="space-y-4">
           <Field label="Nome do produto" htmlFor="recipe-name"><input id="recipe-name" className="input" value={name} onChange={(event) => setName(event.target.value)} placeholder="Ex.: Hambúrguer da casa" /></Field>
+          {linkedProductId ? <p className="-mt-2 text-[10.5px] text-dim">Vinculada ao produto do Pedidos · <span className="font-mono text-muted">{linkedProductId}</span></p> : null}
           <Field label="Preço de venda" htmlFor="recipe-price"><input id="recipe-price" className="input num" inputMode="decimal" value={salePrice} onChange={(event) => setSalePrice(event.target.value)} placeholder="0,00" /></Field>
           <Field label="Rendimento do lote (porções)" htmlFor="recipe-yield" hint="O custo dos insumos será dividido pelo rendimento para comparar com o preço por porção."><input id="recipe-yield" className="input num" type="number" min="1" max="10000" step="1" value={yieldPortions} onChange={(event) => setYieldPortions(event.target.value)} /></Field>
           {mode === 'production' ? <input className="input h-9" value={ingredientSearch}

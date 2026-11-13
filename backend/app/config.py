@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     handoff_audience: str = "dacot-estoque"
     hub_base_url: str | None = None
     hub_module_key: str | None = None
+    orders_integration_secret: str | None = None
+    orders_integration_previous_secret: str | None = None
     cors_origins: Annotated[list[str], NoDecode] = []
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

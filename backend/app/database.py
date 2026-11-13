@@ -49,6 +49,25 @@ class Database:
         collection.create_index(keys, unique=True, partialFilterExpression=expected_filter)
 
     def ensure_indexes(self) -> None:
+        self.db.order_integrations.create_index([("restaurant_id", ASCENDING)], unique=True)
+        self.db.order_integration_events.create_index(
+            [("restaurant_id", ASCENDING), ("event_id", ASCENDING)], unique=True
+        )
+        self.db.order_integration_events.create_index(
+            [("restaurant_id", ASCENDING), ("order_id", ASCENDING), ("order_revision", ASCENDING)]
+        )
+        self.db.order_integration_events.create_index(
+            [("restaurant_id", ASCENDING), ("status", ASCENDING), ("processed_at", DESCENDING)]
+        )
+        self.db.order_integration_exceptions.create_index(
+            [("restaurant_id", ASCENDING), ("event_id", ASCENDING)], unique=True
+        )
+        self.db.order_integration_exceptions.create_index(
+            [("restaurant_id", ASCENDING), ("status", ASCENDING), ("processed_at", DESCENDING)]
+        )
+        self.db.inventory_order_state.create_index(
+            [("restaurant_id", ASCENDING), ("order_id", ASCENDING)], unique=True
+        )
         self.db.ingredients.create_index(
             [("restaurant_id", ASCENDING), ("name_normalized", ASCENDING)], unique=True
         )

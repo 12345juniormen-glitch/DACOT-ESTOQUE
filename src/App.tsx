@@ -19,6 +19,7 @@ const SupplierDetailPage = lazy(() => import('./pages/SupplierDetail').then((mod
 const RecipesPage = lazy(() => import('./pages/Recipes').then((module) => ({ default: module.RecipesPage })));
 const RecipeDetailPage = lazy(() => import('./pages/RecipeDetail').then((module) => ({ default: module.RecipeDetailPage })));
 const LossesPage = lazy(() => import('./pages/Losses').then((module) => ({ default: module.LossesPage })));
+const OrdersIntegrationPage = lazy(() => import('./pages/OrdersIntegration').then((module) => ({ default: module.OrdersIntegrationPage })));
 
 function Gate({ permission, children }: { permission: Permission; children: ReactNode }) {
   const { can } = useApp();
@@ -174,6 +175,14 @@ export default function App() {
               element={
                 <Gate permission="losses.view">
                   <LossesPage />
+                </Gate>
+              }
+            />
+            <Route
+              path="integracao-pedidos"
+              element={
+                <Gate permission="recipes.view">
+                  <OrdersIntegrationPage />
                 </Gate>
               }
             />

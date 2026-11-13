@@ -212,6 +212,7 @@ export interface Recipe {
   updatedAt: string;
   version: number;
   active?: boolean;
+  consumptionEnabled?: boolean;
 }
 
 /** Custo congelado da ficha — protege o histórico de pedidos já realizados. */
@@ -306,6 +307,7 @@ export interface PricePoint {
 
 export type AuditAction =
   | 'stock.adjust'
+  | 'stock.consumption'
   | 'ingredient.update'
   | 'loss.register'
   | 'purchase.receive'

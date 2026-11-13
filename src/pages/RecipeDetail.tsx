@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { BookOpen, Info, Plus, Trash2 } from 'lucide-react';
-import { useApp } from '../state/AppStore';
-import { fetchApiIngredientsByIds, fetchApiInventoryPage, fetchApiRecipe, fetchApiRecipeSnapshotPage } from '../lib/api';
+import { useApp, useCurrentUser } from '../state/AppStore';
+import { fetchApiIngredientsByIds, fetchApiInventoryPage, fetchApiRecipe, fetchApiRecipeSnapshotPage,
+  setApiRecipeConsumption } from '../lib/api';
 import { itemCostKnown, recipeCostCents, recipeCostPerPortionCents, recipeCostGaps, recipeMargin, recipeMarginCalculable } from '../domain/selectors';
 import {
   convertQty,
@@ -32,6 +33,8 @@ import {
 export function RecipeDetailPage() {
   const { id } = useParams();
   const { state, actions, can, mode, ready, notify } = useApp();
+  const currentUser = useCurrentUser();
+  const canManageConsumption = can('recipes.manage') || currentUser.role === 'manager';
   const recipe = state.recipes.find((r) => r.id === id);
   const [recipeLoading, setRecipeLoading] = useState(false);
   const [recipeLookupId, setRecipeLookupId] = useState<string | undefined>();
@@ -41,6 +44,7 @@ export function RecipeDetailPage() {
   const [snapshotHasMore, setSnapshotHasMore] = useState(false);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
   const [snapshotRetry, setSnapshotRetry] = useState(0);
+  const [consumptionSaving, setConsumptionSaving] = useState(false);
   const snapshotRequestRef = useRef(0);
   const [addOpen, setAddOpen] = useState(false);
   const [priceOpen, setPriceOpen] = useState(false);
@@ -229,6 +233,22 @@ export function RecipeDetailPage() {
     ? compatibleIngredientUnits(selectedNewItem.unit, selectedNewItem.conversions)
     : [];
 
+  const toggleConsumption = async () => {
+    if (!recipe || mode !== 'production' || consumptionSaving) return;
+    const enabled = !recipe.consumptionEnabled;
+    if (!window.confirm(enabled
+      ? 'Confirma que a composição e as quantidades desta ficha estão completas para o consumo automático? A ativação vale apenas para novos eventos.'
+      : 'Desativar o consumo automático desta ficha? Baixas anteriores permanecerão no histórico.')) return;
+    setConsumptionSaving(true);
+    try {
+      const updated = await setApiRecipeConsumption(recipe.id, enabled, recipe.version);
+      actions.cacheRecipes([updated]);
+      notify(enabled ? 'Consumo automático habilitado para esta ficha.' : 'Consumo automático desativado.');
+    } catch (error) {
+      notify(error instanceof Error ? error.message : 'Não foi possível atualizar o consumo automático.', 'error');
+    } finally { setConsumptionSaving(false); }
+  };
+
   return (
     <div>
       <BackLink to="/fichas">Fichas técnicas</BackLink>
@@ -269,6 +289,21 @@ export function RecipeDetailPage() {
           ) : null
         }
       />
+
+      {mode === 'production' ? <Panel className="mb-4" title="Consumo automático por vendas"
+        subtitle="Uma ficha nova começa sem permissão para baixar estoque. A ativação confirma que a composição cadastrada representa o produto vendido.">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-[11.5px] text-muted">
+            {recipe.consumptionEnabled ? 'Esta ficha pode orientar baixas de vendas futuras.'
+              : 'Vendas deste produto ficarão pendentes até a ficha ser validada e habilitada.'}
+          </div>
+          {canManageConsumption ? <button type="button"
+            className={recipe.consumptionEnabled ? 'btn btn-ghost' : 'btn btn-primary'}
+            onClick={() => void toggleConsumption()} disabled={consumptionSaving || recipe.active === false}>
+            {consumptionSaving ? 'Salvando…' : recipe.consumptionEnabled ? 'Desativar consumo' : 'Validar e habilitar consumo'}
+          </button> : <span className="text-[10.5px] text-dim">Um administrador pode validar esta ficha.</span>}
+        </div>
+      </Panel> : null}
 
       {recipe.active === false ? <div className="mb-4 border border-warn/30 bg-warn/5 px-3 py-2 text-[12px] text-warn">
         Esta ficha está inativa e foi mantida no histórico. Reative-a para voltar a tratá-la como ficha atual.

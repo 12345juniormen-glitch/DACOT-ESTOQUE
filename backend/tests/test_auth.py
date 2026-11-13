@@ -343,6 +343,9 @@ def test_all_data_api_routes_require_authenticated_principal():
         "/api/v1/auth/session/exchange",
         "/api/v1/auth/refresh",
         "/api/v1/auth/logout",
+        # This endpoint uses the dedicated Pedidos HMAC service credential,
+        # not the browser's HUB session cookie.
+        "/api/v1/integrations/orders/events",
     }
 
     def contains_auth_dependency(dependency):
@@ -362,7 +365,8 @@ def test_all_data_api_routes_require_authenticated_principal():
 def test_all_cookie_authenticated_write_routes_validate_request_origin():
     write_methods = {"POST", "PUT", "PATCH", "DELETE"}
     routes = [route for route in app.routes
-              if getattr(route, "methods", set()).intersection(write_methods)]
+              if getattr(route, "methods", set()).intersection(write_methods)
+              and getattr(route, "path", "") != "/api/v1/integrations/orders/events"]
 
     assert routes
     assert all("require_allowed_origin(request)" in inspect.getsource(route.endpoint)
@@ -374,6 +378,8 @@ def test_all_data_write_routes_declare_a_backend_role_policy():
         "/api/v1/auth/session/exchange",
         "/api/v1/auth/refresh",
         "/api/v1/auth/logout",
+        # Service-to-service authorization is enforced by its HMAC signature.
+        "/api/v1/integrations/orders/events",
     }
     write_methods = {"POST", "PUT", "PATCH", "DELETE"}
     routes = [route for route in app.routes

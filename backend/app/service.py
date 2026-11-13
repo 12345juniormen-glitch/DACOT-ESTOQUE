@@ -13,7 +13,7 @@ from pymongo.errors import DuplicateKeyError
 from app.auth import Principal
 from app.schemas import (IngredientCreate, IngredientUpdate, MovementCreate, PurchaseCreate, PurchaseDraftUpdate,
                          PurchaseReceive, RecipePut, SupplierCreate, CountCreate, CountSelection, CountLineUpdate,
-                         LossCreate, SupplierUpdate, MovementReversal)
+                         LossCreate, SupplierUpdate, MovementReversal, RecipeConsumptionUpdate)
 
 QUANTITY_SCALE = 1000
 QUANTITY_QUANTUM = Decimal("0.001")
@@ -607,7 +607,7 @@ def stock_audit_event(movement: dict, ingredient_name: str) -> dict:
         "_id": f"audit_{movement['_id']}",
         "restaurant_id": movement["restaurant_id"],
         "user_id": movement["actor_id"],
-        "action": "stock.adjust",
+        "action": "stock.consumption" if movement["kind"] == "consumption_by_order" else "stock.adjust",
         "entity": "item",
         "entity_label": ingredient_name,
         "before": str(movement["balance_before"]),
@@ -1114,7 +1114,7 @@ def _apply_movement(db, ingredient_id: str, data: MovementCreate, principal: Pri
         raise HTTPException(status_code=422, detail="Quantity is below the stock precision of 0.001 base units")
     if quantity_milli_delta > MAX_STOCK_MILLI:
         raise HTTPException(status_code=422, detail="Converted quantity exceeds the supported stock range")
-    sign = -1 if data.kind in {"adjustment_out", "loss", "count_out"} else 1
+    sign = -1 if data.kind in {"adjustment_out", "consumption_by_order", "loss", "count_out"} else 1
     balance_before_milli = ingredient.get("current_quantity_milli")
     balance_before_milli = quantity_milli(ingredient["current_quantity"]) if balance_before_milli is None else int(balance_before_milli)
     if balance_before_milli < 0 or balance_before_milli > MAX_STOCK_MILLI:
@@ -1993,6 +1993,8 @@ def upsert_recipe(db, data: RecipePut, principal: Principal) -> dict:
                 "conversion_to_base": factor})
         prior = db.recipes.find_one({"restaurant_id": principal.restaurant_id,
                                      "product_id": data.product_id}, session=session)
+        same_composition = (prior is not None and prior.get("lines") == normalized_lines
+                            and int(prior.get("yield_portions", 1)) == data.yield_portions)
         unchanged = prior is not None and prior.get("product_name") == data.product_name \
             and prior.get("sale_price_cents") == data.sale_price_cents \
             and int(prior.get("yield_portions", 1)) == data.yield_portions \
@@ -2010,6 +2012,7 @@ def upsert_recipe(db, data: RecipePut, principal: Principal) -> dict:
             "yield_portions": data.yield_portions,
             "sale_price_cents": data.sale_price_cents,
             "active": True,
+            "consumption_enabled": bool(same_composition and prior.get("consumption_enabled", False)),
             "version": 1,
             "updated_by": principal.user_id,
             "updated_at": timestamp,
@@ -2080,6 +2083,8 @@ def set_recipe_active(db, product_id: str, active: bool, expected_version: int,
         timestamp = now()
         changes = {"active": active, "version": current_version + 1,
                    "updated_at": timestamp, "updated_by": principal.user_id}
+        if not active:
+            changes["consumption_enabled"] = False
         event_id = record_audit_event(db, event_id=f"audit_recipe_status:{uuid4().hex}",
             tenant=principal.restaurant_id, user_id=principal.user_id, action="recipe.update",
             entity="recipe", label=prior["product_name"],
@@ -2092,6 +2097,53 @@ def set_recipe_active(db, product_id: str, active: bool, expected_version: int,
         version_filter = {"version": current_version} if "version" in prior else {"version": {"$exists": False}}
         updated = db.recipes.find_one_and_update(
             {**query, **version_filter}, {"$set": changes},
+            return_document=ReturnDocument.AFTER, session=session)
+        if updated is None:
+            raise HTTPException(status_code=409, detail="Recipe changed concurrently; refresh and retry")
+        return updated
+
+    with db.client.start_session() as session:
+        return session.with_transaction(update)
+
+
+def set_recipe_consumption(db, product_id: str, data: RecipeConsumptionUpdate,
+                           principal: Principal) -> dict:
+    query = {"restaurant_id": principal.restaurant_id, "product_id": product_id}
+
+    def update(session):
+        prior = db.recipes.find_one(query, session=session)
+        if prior is None:
+            raise HTTPException(status_code=404, detail="Recipe not found")
+        if not prior.get("active", True):
+            raise HTTPException(status_code=409, detail="Activate the recipe before enabling automatic consumption")
+        version = int(prior.get("version", 1))
+        if version != data.expected_version:
+            raise HTTPException(status_code=409, detail="Recipe changed since it was loaded; refresh and retry")
+        enabled = bool(prior.get("consumption_enabled", False))
+        if enabled == data.consumption_enabled:
+            return prior
+        if data.consumption_enabled:
+            ingredient_ids = [line["ingredient_id"] for line in prior.get("lines", [])]
+            ingredients = list(db.ingredients.find({"restaurant_id": principal.restaurant_id,
+                "_id": {"$in": ingredient_ids}, "active": True}, session=session))
+            if not ingredient_ids or len(ingredients) != len(set(ingredient_ids)):
+                raise HTTPException(status_code=409,
+                    detail="The recipe must contain only active ingredients before consumption is enabled")
+        timestamp = now()
+        reason = "Consumo automático validado e ativado" if data.consumption_enabled else "Consumo automático desativado"
+        audit_id = record_audit_event(db, event_id=f"audit_recipe_consumption:{uuid4().hex}",
+            tenant=principal.restaurant_id, user_id=principal.user_id, action="recipe.update",
+            entity="recipe", label=prior["product_name"],
+            before="consumo ativo" if enabled else "consumo inativo",
+            after="consumo ativo" if data.consumption_enabled else "consumo inativo",
+            reason=reason, occurred_at=timestamp, source_type="recipe", source_id=prior["_id"],
+            session=session)
+        changes = {"consumption_enabled": data.consumption_enabled, "version": version + 1,
+                   "updated_at": timestamp, "updated_by": principal.user_id}
+        if audit_id:
+            changes["updated_audit_event_id"] = audit_id
+        version_filter = {"version": version} if "version" in prior else {"version": {"$exists": False}}
+        updated = db.recipes.find_one_and_update({**query, **version_filter}, {"$set": changes},
             return_document=ReturnDocument.AFTER, session=session)
         if updated is None:
             raise HTTPException(status_code=409, detail="Recipe changed concurrently; refresh and retry")

@@ -118,7 +118,7 @@ class IngredientUpdate(BaseModel):
 
 
 class MovementCreate(BaseModel):
-    kind: Literal["purchase", "adjustment_in", "adjustment_out", "loss", "count_in", "count_out"]
+    kind: Literal["purchase", "adjustment_in", "adjustment_out", "consumption_by_order", "loss", "count_in", "count_out"]
     quantity: float = Field(gt=0, le=MAX_QUANTITY, allow_inf_nan=False)
     unit_cost_cents: int | None = Field(default=None, ge=0, le=MAX_CENTS)
     reason: str = Field(min_length=1, max_length=300)
@@ -319,6 +319,11 @@ class RecipePut(BaseModel):
 
 class RecipeStatusUpdate(BaseModel):
     active: bool
+    expected_version: int = Field(ge=1)
+
+
+class RecipeConsumptionUpdate(BaseModel):
+    consumption_enabled: bool
     expected_version: int = Field(ge=1)
 
 

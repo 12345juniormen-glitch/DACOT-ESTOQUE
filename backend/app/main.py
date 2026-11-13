@@ -14,11 +14,14 @@ from app.auth import (TAB_SESSION_HEADER, Principal, authenticated_principal, co
                       valid_browser_binding, valid_tab_session_id)
 from app.config import get_settings
 from app.database import Database, MongoTransactionSupportError
+from app.order_integration import (IntegrationActivation, IntegrationResolution, OrderSnapshotEvent,
+                                   process_order_event, resolve_order_exception,
+                                   verify_request_signature)
 from app.schemas import (HandoffExchange, IngredientCreate, IngredientUpdate, MovementCreate,
                          PurchaseCreate, PurchaseDraftUpdate, PurchaseReceive, PurchaseReceiptReversal,
                          PurchaseStatusUpdate, RecipePut, SupplierCreate, SupplierUpdate, CountCreate,
                          CountSelection, CountLineUpdate, CountApproval, LossCreate, MovementReversal,
-                         RecipeStatusUpdate)
+                         RecipeStatusUpdate, RecipeConsumptionUpdate)
 from app.service import (append_movement, create_ingredient, create_purchase, receive_purchase, reverse_purchase_receipt,
                          create_supplier, set_purchase_status, upsert_recipe, update_ingredient,
                          update_supplier, create_count, set_count_line, approve_count, register_loss,
@@ -26,7 +29,7 @@ from app.service import (append_movement, create_ingredient, create_purchase, re
                          set_recipe_active, movement_insights, purchase_insights, inventory_insights,
                          operational_insights, replenishment_recommendations, price_rise_insights,
                          ingredient_price_history, count_selection_query, list_loss_month_page, get_loss, count_insights, get_count,
-                         recipe_insights, get_recipe, global_search)
+                         recipe_insights, get_recipe, global_search, set_recipe_consumption)
 
 settings = get_settings()
 
@@ -830,6 +833,13 @@ def patch_recipe_status(product_id: str, data: RecipeStatusUpdate, request: Requ
                              data.expected_version, principal)
 
 
+@app.patch("/api/v1/recipes/{product_id}/consumption")
+def patch_recipe_consumption(product_id: str, data: RecipeConsumptionUpdate, request: Request,
+                             principal: Principal = Depends(writer_roles())):
+    require_allowed_origin(request)
+    return public_api_value(set_recipe_consumption(db_from(request), product_id, data, principal))
+
+
 @app.get("/api/v1/recipes")
 def list_recipes(request: Request, limit: int = Query(default=500, ge=1, le=500),
                  offset: int = Query(default=0, ge=0), ingredient_id: str | None = Query(default=None, min_length=1, max_length=200),
@@ -880,3 +890,114 @@ def get_recipe_by_id(product_id: str, request: Request,
                      principal: Principal = Depends(authenticated_principal)):
     require_allowed_origin(request)
     return public_api_value(get_recipe(db_from(request), principal, product_id))
+
+
+@app.post("/api/v1/integrations/orders/events")
+async def receive_order_integration_event(request: Request,
+                                         x_dacot_source: str | None = Header(default=None),
+                                         x_dacot_timestamp: str | None = Header(default=None),
+                                         x_dacot_signature: str | None = Header(default=None)):
+    if x_dacot_source != "dacot-pedidos":
+        raise HTTPException(status_code=401, detail="Unauthorized integration source")
+    body = await request.body()
+    if len(body) > 262144:
+        raise HTTPException(status_code=413, detail="Integration event is too large")
+    verify_request_signature(settings.orders_integration_secret, x_dacot_timestamp,
+                             x_dacot_signature, body, settings.orders_integration_previous_secret)
+    try:
+        event = OrderSnapshotEvent.model_validate_json(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid order integration event") from exc
+    return public_api_value(process_order_event(db_from(request), event))
+
+
+@app.get("/api/v1/integrations/orders")
+def get_orders_integration(request: Request,
+                           principal: Principal = Depends(authenticated_principal)):
+    db = db_from(request)
+    activation = db.order_integrations.find_one({"restaurant_id": principal.restaurant_id})
+    events = list(db.order_integration_events.find(
+        {"restaurant_id": principal.restaurant_id}, {"_id": 0, "fingerprint": 0, "event": 0}
+    ).sort("processed_at", -1).limit(50))
+    exceptions = list(db.order_integration_exceptions.find(
+        {"restaurant_id": principal.restaurant_id, "status": {"$in": ["blocked", "needs_action"]}},
+        {"_id": 0, "fingerprint": 0}
+    ).sort("processed_at", -1).limit(50))
+    return public_api_value({"active": bool(activation and activation.get("active")),
+        "enabled_at": activation.get("enabled_at") if activation else None,
+        "processed_count": db.order_integration_events.count_documents(
+            {"restaurant_id": principal.restaurant_id, "status": "processed"}),
+        "pending_count": db.order_integration_events.count_documents(
+            {"restaurant_id": principal.restaurant_id, "status": {"$in": ["blocked", "needs_action"]}}),
+        "events": events, "exceptions": exceptions})
+
+
+@app.get("/api/v1/integrations/orders/catalog")
+def get_orders_integration_catalog(request: Request,
+                                  principal: Principal = Depends(authenticated_principal)):
+    db = db_from(request)
+    rows = list(db.order_integration_events.aggregate([
+        {"$match": {"restaurant_id": principal.restaurant_id}},
+        {"$sort": {"processed_at": -1}},
+        {"$unwind": "$event.items"},
+        {"$group": {"_id": "$event.items.product_id",
+                     "product_name": {"$first": "$event.items.product_name"},
+                     "last_seen": {"$first": "$processed_at"}}},
+        {"$sort": {"product_name": 1, "_id": 1}},
+        {"$limit": 500},
+    ]))
+    product_ids = [row["_id"] for row in rows]
+    recipes = {recipe["product_id"]: recipe for recipe in db.recipes.find(
+        {"restaurant_id": principal.restaurant_id, "product_id": {"$in": product_ids}},
+        {"_id": 0, "product_id": 1, "active": 1, "consumption_enabled": 1,
+         "version": 1, "product_name": 1},
+    )} if product_ids else {}
+    return [{"product_id": row["_id"], "product_name": row.get("product_name") or row["_id"],
+             "last_seen": row.get("last_seen"),
+             "recipe_exists": row["_id"] in recipes,
+        "recipe_active": bool(recipes.get(row["_id"], {}).get("active", True))
+                if row["_id"] in recipes else False,
+             "consumption_enabled": bool(recipes.get(row["_id"], {}).get("consumption_enabled", False)),
+             "recipe_version": int(recipes[row["_id"]].get("version", 1))
+                if row["_id"] in recipes else None}
+            for row in rows]
+
+
+@app.put("/api/v1/integrations/orders/activation")
+def set_orders_integration_activation(data: IntegrationActivation, request: Request,
+                                      principal: Principal = Depends(writer_roles())):
+    require_allowed_origin(request)
+    db = db_from(request)
+    current = db.order_integrations.find_one({"restaurant_id": principal.restaurant_id})
+    timestamp = datetime.now(timezone.utc)
+    updates = {"active": data.active, "updated_at": timestamp, "updated_by": principal.user_id}
+    if data.active and not (current and current.get("active")):
+        updates["enabled_at"] = timestamp
+    db.order_integrations.update_one({"restaurant_id": principal.restaurant_id},
+        {"$set": updates, "$setOnInsert": {"restaurant_id": principal.restaurant_id}}, upsert=True)
+    return {"active": data.active, "enabled_at": updates.get("enabled_at",
+        current.get("enabled_at") if current else None)}
+
+
+@app.post("/api/v1/integrations/orders/events/{event_id}/retry")
+def retry_order_integration_event(event_id: str, request: Request,
+                                  principal: Principal = Depends(writer_roles())):
+    require_allowed_origin(request)
+    db = db_from(request)
+    stored = db.order_integration_events.find_one({"restaurant_id": principal.restaurant_id,
+                                                    "event_id": event_id})
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Integration event not found")
+    try:
+        event = OrderSnapshotEvent.model_validate(stored["event"])
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="Stored integration event is invalid") from exc
+    return public_api_value(process_order_event(db, event, retry=True))
+
+
+@app.post("/api/v1/integrations/orders/exceptions/{event_id}/resolve")
+def resolve_order_integration_exception(event_id: str, data: IntegrationResolution, request: Request,
+                                        principal: Principal = Depends(writer_roles())):
+    require_allowed_origin(request)
+    return public_api_value(resolve_order_exception(db_from(request), principal.restaurant_id,
+        event_id, principal.user_id, data.reason))

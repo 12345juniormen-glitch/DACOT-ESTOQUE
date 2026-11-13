@@ -179,6 +179,9 @@ interface ApiMovement {
   balance_after: number;
   stock_version_after?: number;
   reversal_of?: string | null;
+  source?: string | null;
+  source_order_id?: string | null;
+  source_order_number?: number | null;
   reversed_by_movement_id?: string | null;
 }
 
@@ -326,6 +329,7 @@ interface ApiRecipe {
   yield_portions?: number;
   version?: number;
   active?: boolean;
+  consumption_enabled?: boolean;
   lines: { ingredient_id: string; quantity: number; unit: string; conversion_to_base?: number }[];
   created_at?: string;
   updated_at: string;
@@ -423,11 +427,12 @@ export async function fetchApiIngredientsByIds(ids: string[]): Promise<Inventory
 export function mapMovement(movement: ApiMovement): Movement {
   const openingBalance = isOpeningBalanceMovement(movement.kind, movement.purchase_reference, movement.reason);
   const countCode = countMovementCode(movement.kind, movement.reason);
-  const direction = ['adjustment_out', 'count_out', 'loss'].includes(movement.kind) ? 'out' : 'in';
+  const direction = ['adjustment_out', 'count_out', 'loss', 'consumption_by_order'].includes(movement.kind) ? 'out' : 'in';
   const type: Movement['type'] = openingBalance ? 'OPENING_BALANCE'
     : movement.kind === 'purchase' ? 'PURCHASE'
       : countCode ? 'COUNT_ADJUSTMENT'
     : movement.kind === 'loss' ? 'LOSS'
+      : movement.kind === 'consumption_by_order' ? 'CONSUMPTION'
       : movement.kind === 'adjustment_in' || movement.kind === 'adjustment_out'
         ? 'ADJUSTMENT' : 'ADJUSTMENT';
   return {
@@ -438,7 +443,9 @@ export function mapMovement(movement: ApiMovement): Movement {
     reason: openingBalance ? 'Saldo inicial informado no cadastro'
       : countCode ? `Diferença confirmada na contagem ${countCode}` : movement.reason,
     origin: openingBalance ? 'Cadastro do insumo'
-      : countCode ? `Contagem física ${countCode}` : movement.purchase_reference ?? 'Ajuste manual', userId: movement.actor_id,
+      : countCode ? `Contagem física ${countCode}`
+        : movement.source === 'dacot-pedidos' ? `Pedido #${movement.source_order_number ?? movement.source_order_id ?? ''}`
+          : movement.purchase_reference ?? 'Ajuste manual', userId: movement.actor_id,
     balanceAfter: movement.balance_after,
     stockVersionAfter: movement.stock_version_after,
     supplierId: movement.supplier_id ?? null, reversalOf: movement.reversal_of ?? null,
@@ -480,6 +487,7 @@ function mapRecipe(recipe: ApiRecipe): Recipe {
       unit: asUnit(line.unit), conversionToBase: line.conversion_to_base })),
     createdAt: recipe.created_at ?? recipe.updated_at, updatedAt: recipe.updated_at,
     version: recipe.version ?? 1, active: recipe.active ?? true,
+    consumptionEnabled: recipe.consumption_enabled ?? false,
   };
 }
 
@@ -962,6 +970,15 @@ export async function saveApiRecipe(recipe: Recipe, expectedVersion: number | nu
     }),
   });
   return mapRecipe(saved);
+}
+
+export async function setApiRecipeConsumption(productId: string, consumptionEnabled: boolean,
+                                               expectedVersion: number): Promise<Recipe> {
+  const result = await apiRequest<ApiRecipe>(`/recipes/${encodeURIComponent(productId)}/consumption`, {
+    method: 'PATCH', body: JSON.stringify({ consumption_enabled: consumptionEnabled,
+      expected_version: expectedVersion }),
+  });
+  return mapRecipe(result);
 }
 
 export async function setApiRecipeActive(productId: string, active: boolean, expectedVersion: number): Promise<Recipe> {
