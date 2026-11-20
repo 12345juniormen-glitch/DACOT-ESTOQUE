@@ -281,6 +281,39 @@ def test_session_revoked_during_hub_check_is_rejected(monkeypatch, settings):
     assert error.value.status_code == 401
 
 
+def test_session_expiring_during_hub_check_is_rejected(monkeypatch, settings):
+    now = datetime.now(timezone.utc)
+    class Clock(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            return now if cls.calls == 1 else now + timedelta(seconds=2)
+
+    monkeypatch.setattr(auth, "datetime", Clock)
+    session = {
+        "_id": "session-expires-at-hub", "user_id": "65a000000000000000000001",
+        "restaurant_id": "65a000000000000000000002", "role": "manager",
+        "hub_access": {"user": 1, "tenant": 2, "module": 3}, "revoked_at": None,
+        "access_expires_at": now + timedelta(seconds=1), "expires_at": now + timedelta(days=2),
+    }
+    class Sessions:
+        def find_one(self, _query):
+            return session
+
+        def update_one(self, query, _update):
+            active = session["access_expires_at"] > query["access_expires_at"]["$gt"]
+            return SimpleNamespace(matched_count=int(active))
+
+    request = _session_request(session, settings)
+    request.app.state.database.db.auth_sessions = Sessions()
+    monkeypatch.setattr(auth, "hub_confirms_access", lambda *_: None)
+    with pytest.raises(HTTPException) as error:
+        auth.principal_from_session(request, settings)
+    assert error.value.status_code == 401
+
+
 def test_session_replaced_for_another_restaurant_during_hub_check_is_rejected(monkeypatch, settings):
     settings.environment = "production"
     now = datetime.now(timezone.utc)

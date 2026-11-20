@@ -181,6 +181,7 @@ def principal_from_session(request: Request, settings: Settings) -> Principal:
         "role": session_identity["role"],
         "hub_access": session_identity["hub_access"],
     }, settings)
+    now = datetime.now(timezone.utc)
     still_active = database.auth_sessions.update_one({
         "_id": session["_id"], "revoked_at": None,
         "access_expires_at": {"$gt": now}, "expires_at": {"$gt": now},
@@ -262,6 +263,7 @@ def refresh_local_session(db, *, binding: str, tab_id: str, settings: Settings) 
         "role": session_identity["role"],
         "hub_access": session_identity["hub_access"],
     }, settings)
+    now = datetime.now(timezone.utc)
     result = db.auth_sessions.update_one(
         {"_id": session["_id"], "revoked_at": None,
          "refresh_expires_at": {"$gt": now}, "expires_at": {"$gt": now},

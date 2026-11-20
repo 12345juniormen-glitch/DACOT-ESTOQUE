@@ -47,6 +47,20 @@ def test_exchange_issues_secure_httponly_host_cookie(client):
     assert "samesite=lax" in cookie and "path=/" in cookie
 
 
+def test_exchange_rejects_handoff_that_expires_during_hub_check(client, monkeypatch):
+    def expires_at_hub(claims, _settings):
+        claims["exp"] = int(datetime.now(timezone.utc).timestamp()) - 1
+
+    created = []
+    monkeypatch.setattr(main, "hub_confirms_module_active", expires_at_hub)
+    monkeypatch.setattr(main, "create_local_session", lambda *args, **kwargs: created.append(True))
+    response = client.post("/api/v1/auth/session/exchange", json={"handoff": make_handoff()},
+        headers={"Origin": "https://estoque.dacot.com.br",
+                 "X-DACOT-Tab-Session": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"})
+    assert response.status_code == 401
+    assert created == []
+
+
 def test_api_responses_disable_private_caching_including_auth_errors(client):
     from types import SimpleNamespace
 

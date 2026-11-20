@@ -170,6 +170,8 @@ def exchange_handoff(data: HandoffExchange, request: Request, response: Response
         raise HTTPException(status_code=422, detail="Valid tab session ID required")
     claims = decode_handoff(data.handoff, settings)
     hub_confirms_module_active(claims, settings)
+    if claims["exp"] <= int(datetime.now(timezone.utc).timestamp()):
+        raise HTTPException(status_code=401, detail="Invalid or expired DACOT-HUB handoff")
     existing_binding = request.cookies.get(cookie_name(settings))
     binding = existing_binding if valid_browser_binding(existing_binding) else issue_browser_binding()
     try:
