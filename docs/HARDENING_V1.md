@@ -15,8 +15,7 @@ Nenhuma falha P0 reproduzida nos cenários executados. Isso não é certificaç�
 
 ## P2
 
-- `npm audit` identificou duas entradas moderadas relacionadas a `react-router`/`react-router-dom` (avisos GHSA-wrjc-x8rr-h8h6 e GHSA-337j-9hxr-rhxg). A correção sugerida exige mudança de versão principal. Exploração no aplicativo não foi demonstrada; analisar compatibilidade e os caminhos de redirecionamento antes de atualizar.
-- `pip-audit` reportou 41 entradas (incluindo duplicatas de identificadores) em `pymongo`, `PyJWT` e dependência transitiva `starlette`. Alguns avisos exigem recursos como JWKS, GridFS, upload multipart ou StaticFiles, cujo uso vulnerável não foi comprovado nesta verificação. Os avisos não equivalem a 41 vulnerabilidades exploráveis neste projeto. É necessário triar todos os avisos e atualizar versões compatíveis em mudança específica com testes completos; não presumir ausência de impacto a partir de uma amostra.
+- A revisão direcionada de dependências e seus resultados estão em [DEPENDENCIAS_V1.md](DEPENDENCIAS_V1.md). As versões agora propostas eliminam os alertas encontrados pelas ferramentas na data da revisão; a migração do React Router e Starlette exige homologação no ambiente de teste antes da publicação.
 - As rotas existentes oferecem formulários e tentativas de recuperação para erros de rede; nenhum problema concreto de cliques foi demonstrado nesta execução. A validação manual com usuários de teste permanece necessária para decidir melhorias operacionais.
 
 ## Evidências de execução

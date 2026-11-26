@@ -2,6 +2,8 @@
 
 Este procedimento requer um responsável, um ambiente de recuperação isolado e uma cópia verificada antes do piloto. Nunca restaure sobre o Atlas de produção durante um ensaio. O projeto não configura nem comprova uma rotina automática de backups.
 
+**Validação local pendente:** nesta revisão, `mongodump` e `mongorestore` não estavam disponíveis no PATH nem na instalação MongoDB encontrada. Portanto, não foi executado backup ou restauração, nem comparados dados antes e depois. Instalar as MongoDB Database Tools de fonte oficial em ambiente apropriado e executar o ensaio com banco descartável e dados fictícios antes do piloto.
+
 ## Preparação
 
 1. O proprietário identifica o cluster e a base do Estoque, seus responsáveis, período de retenção, RPO e RTO. Confere no Atlas se o plano atual oferece snapshots e recuperação, suas restrições e eventuais custos antes de habilitar qualquer opção. Não pressupor que a funcionalidade esteja ativa.

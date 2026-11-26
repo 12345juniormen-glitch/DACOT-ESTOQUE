@@ -19,7 +19,7 @@ Para executar a API local e configurar MongoDB, autenticação e serviços hospe
 [`backend/README.md`](backend/README.md). Builds de produção operam em modo real e não carregam os
 dados de demonstração.
 
-Stack: React 18, TypeScript, Vite, Tailwind CSS 4, React Router 6, Lucide. Fontes Instrument Sans
+Stack: React 18, TypeScript, Vite, Tailwind CSS 4, React Router 7, Lucide. Fontes Instrument Sans
 (variável) e IBM Plex Mono embarcadas via Fontsource.
 
 ## Telas
